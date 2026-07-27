@@ -1,0 +1,24 @@
+# Go
+*.exe
+*.test
+*.out
+go.work
+go.work.sum
+vendor/
+
+# Build
+/dist/
+/bin/
+/tmp/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# State files (user data)
+~/.gphoto2proton/
