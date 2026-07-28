@@ -1,6 +1,10 @@
+---
+baseline_commit: "222306d"
+---
+
 # Story 1.2: Streaming Takeout Archive Reader
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -19,14 +23,14 @@ so that I don't need double the disk space for migration.
 
 ## Tasks / Subtasks
 
-- [ ] Implement internal/takeout/stream.go — tar/tgz streaming reader
-  - [ ] TakeoutReader implementation with Next() returning (Media, io.ReadCloser, error)
-  - [ ] Multi-part archive support (auto-detects .tar, .tgz, .tar.gz, 001.tar)
-  - [ ] Sidecar JSON pairing — for each media file, locate corresponding .json sidecar
-  - [ ] Skip non-media entries (directory entries, thumbnails)
-- [ ] Implement internal/takeout/metadata.go — JSON sidecar parser
-  - [ ] Parse Google Photos JSON format (title, photoTakenTime, geoData, description)
-  - [ ] Map to domain.MediaMeta struct
+- [x] Implement internal/takeout/stream.go — tar/tgz streaming reader
+  - [x] TakeoutReader implementation with Next() returning (Media, io.ReadCloser, error)
+  - [x] Multi-part archive support (auto-detects .tar, .tgz, .tar.gz, 001.tar)
+  - [x] Sidecar JSON pairing — for each media file, locate corresponding .json sidecar
+  - [x] Skip non-media entries (directory entries, thumbnails)
+- [x] Implement internal/takeout/metadata.go — JSON sidecar parser
+  - [x] Parse Google Photos JSON format (title, photoTakenTime, geoData, description)
+  - [x] Map to domain.MediaMeta struct
 
 ## Dev Notes
 

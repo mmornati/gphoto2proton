@@ -1,43 +1,180 @@
-// Copyright (c) 2026 mmornati
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
 package takeout
 
 import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 
 	"github.com/mmornati/gphoto2proton/internal/domain"
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
 
-type StreamReader struct{}
-
-func NewStreamReader() port.TakeoutReader {
-	return &StreamReader{}
+var mediaExtensions = map[string]bool{
+	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
+	".heic": true, ".mov": true, ".mp4": true,
+	".cr2": true, ".nef": true, ".arw": true,
 }
 
-func (s *StreamReader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error) {
-	return nil, nil, errors.New("not implemented")
+type mediaEntry struct {
+	Name        string
+	MediaPath   string
+	SidecarPath string
+	Data        []byte
 }
 
-func (s *StreamReader) AlbumManifest(ctx context.Context) ([]domain.Album, error) {
+type Reader struct {
+	readers []*tar.Reader
+	files   []io.Closer
+	current int
+	entries []mediaEntry
+	cursor  int
+	mu      sync.Mutex
+	initErr error
+}
+
+func NewStreamReader(paths ...string) port.TakeoutReader {
+	r := &Reader{}
+	if len(paths) == 0 {
+		return r
+	}
+	expanded := expandMultiPart(paths)
+	for _, p := range expanded {
+		if err := r.openArchive(p); err != nil {
+			r.initErr = err
+			return r
+		}
+	}
+	r.initErr = r.scanAll()
+	return r
+}
+
+func expandMultiPart(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	dir := filepath.Dir(paths[0])
+	base := filepath.Base(paths[0])
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return paths
+	}
+	matched := make([]string, 0)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), base) {
+			matched = append(matched, filepath.Join(dir, e.Name()))
+		}
+	}
+	sort.Strings(matched)
+	return matched
+}
+
+func (r *Reader) openArchive(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("opening %s: %w", path, err)
+	}
+	if isGzip(path) {
+		gr, err := gzip.NewReader(bufio.NewReader(f))
+		if err != nil {
+			f.Close()
+			return fmt.Errorf("decompressing %s: %w", path, err)
+		}
+		r.readers = append(r.readers, tar.NewReader(gr))
+		r.files = append(r.files, gr, f)
+	} else {
+		r.readers = append(r.readers, tar.NewReader(bufio.NewReader(f)))
+		r.files = append(r.files, f)
+	}
+	return nil
+}
+
+func isGzip(path string) bool {
+	return strings.HasSuffix(path, ".tgz") || strings.HasSuffix(path, ".tar.gz")
+}
+
+func (r *Reader) scanAll() error {
+	for r.current < len(r.readers) {
+		for {
+			hd, err := r.readers[r.current].Next()
+			if errors.Is(err, io.EOF) {
+				r.current++
+				break
+			}
+			if err != nil {
+				return fmt.Errorf("reading tar part %d: %w", r.current+1, err)
+			}
+			if hd.Typeflag != tar.TypeReg {
+				continue
+			}
+			name := filepath.Base(hd.Name)
+			if !isMediaFile(name) {
+				continue
+			}
+			var buf bytes.Buffer
+			if _, err := io.Copy(&buf, r.readers[r.current]); err != nil {
+				return fmt.Errorf("reading %s: %w", hd.Name, err)
+			}
+			sidecarPath := hd.Name + ".json"
+			r.entries = append(r.entries, mediaEntry{
+				Name:        name,
+				MediaPath:   hd.Name,
+				SidecarPath: sidecarPath,
+				Data:        buf.Bytes(),
+			})
+		}
+	}
+	r.current = 0
+	for _, c := range r.files {
+		c.Close()
+	}
+	r.files = nil
+	return nil
+}
+
+func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.initErr != nil {
+		return nil, nil, r.initErr
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	default:
+	}
+
+	if r.cursor >= len(r.entries) {
+		return nil, nil, io.EOF
+	}
+
+	entry := r.entries[r.cursor]
+	r.cursor++
+
+	media := &domain.Media{
+		Filename: entry.Name,
+	}
+
+	return media, io.NopCloser(bytes.NewReader(entry.Data)), nil
+}
+
+func (r *Reader) AlbumManifest(ctx context.Context) ([]domain.Album, error) {
 	return nil, errors.New("not implemented")
+}
+
+func isMediaFile(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	return mediaExtensions[ext]
 }
