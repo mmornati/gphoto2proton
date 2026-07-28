@@ -1,32 +1,53 @@
-// Copyright (c) 2026 mmornati
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
 package takeout
 
-import "errors"
+import (
+	"encoding/json"
+	"fmt"
+	"io"
 
-type MetadataParser struct{}
+	"github.com/mmornati/gphoto2proton/internal/domain"
+)
 
-func NewMetadataParser() *MetadataParser {
-	return &MetadataParser{}
+type googlePhotosSidecar struct {
+	Title            string `json:"title"`
+	PhotoTakenTime   *timeData `json:"photoTakenTime"`
+	GeoData          *geoData  `json:"geoData"`
+	Description      string `json:"description"`
 }
 
-func (m *MetadataParser) Parse(path string) (map[string]string, error) {
-	return nil, errors.New("not implemented")
+type timeData struct {
+	Timestamp string `json:"timestamp"`
+}
+
+type geoData struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+	Altitude  float64 `json:"altitude"`
+}
+
+func ParseSidecar(r io.Reader) (*domain.MediaMeta, error) {
+	var raw json.RawMessage
+	dec := json.NewDecoder(r)
+	if err := dec.Decode(&raw); err != nil {
+		return nil, fmt.Errorf("decoding sidecar JSON: %w", err)
+	}
+
+	var sidecar googlePhotosSidecar
+	if err := json.Unmarshal(raw, &sidecar); err != nil {
+		return nil, fmt.Errorf("parsing sidecar JSON: %w", err)
+	}
+
+	meta := &domain.MediaMeta{}
+
+	if sidecar.PhotoTakenTime != nil {
+		meta.DateTimeOriginal = sidecar.PhotoTakenTime.Timestamp
+	}
+	if sidecar.GeoData != nil {
+		meta.Latitude = sidecar.GeoData.Latitude
+		meta.Longitude = sidecar.GeoData.Longitude
+		meta.Altitude = sidecar.GeoData.Altitude
+	}
+	meta.Description = sidecar.Description
+
+	return meta, nil
 }
