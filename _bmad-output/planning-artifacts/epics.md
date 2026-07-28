@@ -79,3 +79,22 @@ User can run `gphoto2proton sync <takeout-dir>` and migrate all photos with corr
 ### Epic 2: Album Recreation
 Albums from Google Photos are recreated in Proton Photos with correct file membership, powered by the album manifest extracted during Epic 1's Takeout parsing.
 **FRs covered:** FR5, FR6
+
+## Story 1-6: Proton Photos API Probe Verdict
+
+**Status:** ⚠️ PENDING — Requires human to run probe script
+
+A probe script has been created at `cmd/probe/main.go` and API patterns documented in `_bmad-output/planning-artifacts/research/photos-api-probe-2026-07-27.md`.
+
+**To decide Epic 2 viability, run:**
+```bash
+go run ./cmd/probe/
+```
+
+The probe will test:
+- `https://photos-api.proton.me/photos/v1/albums` — expected album CRUD endpoint
+- `https://drive-api.proton.me/drive/v1/albums` — fallback via Drive API
+
+**Outcome scenarios:**
+- **✅ Photos API supports albums:** Proceed with Epic 2 as planned
+- **❌ No album API exists:** Use Proton Drive folders as album proxy (`/gphoto2proton/Albums/<Name>/`), adjust Epic 2 scope
