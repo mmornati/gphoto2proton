@@ -38,6 +38,8 @@ type StateTracker interface {
 	Init(ctx context.Context, sessionID string) error
 	Record(ctx context.Context, fileID string, state domain.State) error
 	RecordAlbum(ctx context.Context, albumID string, state domain.State) error
+	RecordAlbumMembership(ctx context.Context, albumName, fileName string) error
+	AccumulatedAlbums(ctx context.Context) ([]domain.Album, error)
 	FileStates(ctx context.Context, sessionID string) ([]FileEntry, error)
 	Close() error
 }

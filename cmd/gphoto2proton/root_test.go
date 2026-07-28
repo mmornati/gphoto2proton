@@ -42,7 +42,7 @@ func TestRootHelp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, flag := range []string{"--takeout-dir", "--album-recreate", "--resume", "--state-dir"} {
+	for _, flag := range []string{"--takeout-dir", "--takeout-archive", "--delete-after", "--album-recreate", "--resume", "--state-dir"} {
 		if !strings.Contains(output, flag) {
 			t.Errorf("expected flag %q in help output", flag)
 		}
@@ -53,10 +53,10 @@ func TestSyncMissingFlag(t *testing.T) {
 	root := newRootCmd()
 	_, err := testExecute(root, "sync")
 	if err == nil {
-		t.Fatal("expected error for missing --takeout-dir flag")
+		t.Fatal("expected error for missing flags")
 	}
-	if !strings.Contains(err.Error(), "takeout-dir") {
-		t.Errorf("expected error mentioning takeout-dir, got: %v", err)
+	if !strings.Contains(err.Error(), "takeout-dir") && !strings.Contains(err.Error(), "takeout-archive") {
+		t.Errorf("expected error mentioning takeout-dir or takeout-archive, got: %v", err)
 	}
 }
 
@@ -91,5 +91,75 @@ func TestStateDirDefault(t *testing.T) {
 	}
 	if !strings.Contains(output, ".gphoto2proton/state") {
 		t.Errorf("expected state-dir default path in help output, got: %s", output)
+	}
+}
+
+func TestSyncWithTakeoutArchive(t *testing.T) {
+	root := newRootCmd()
+	_, err := testExecute(root, "sync", "--takeout-archive", "/tmp/test.tgz")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSyncWithDeleteAfter(t *testing.T) {
+	root := newRootCmd()
+	_, err := testExecute(root, "sync", "--takeout-archive", "/tmp/test.tgz", "--delete-after")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestSyncMutualExclusivity(t *testing.T) {
+	root := newRootCmd()
+	_, err := testExecute(root, "sync", "--takeout-dir", "/tmp/dir", "--takeout-archive", "/tmp/a.tgz")
+	if err == nil {
+		t.Fatal("expected error for mutually exclusive flags")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestSyncMissingBothFlags(t *testing.T) {
+	root := newRootCmd()
+	_, err := testExecute(root, "sync")
+	if err == nil {
+		t.Fatal("expected error for missing flags")
+	}
+	if !strings.Contains(err.Error(), "takeout-dir") && !strings.Contains(err.Error(), "takeout-archive") {
+		t.Errorf("expected error mentioning takeout-dir or takeout-archive, got: %v", err)
+	}
+}
+
+func TestSyncHelpShowsNewFlags(t *testing.T) {
+	root := newRootCmd()
+	output, err := testExecute(root, "sync", "--help")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, flag := range []string{"--takeout-archive", "--delete-after"} {
+		if !strings.Contains(output, flag) {
+			t.Errorf("expected flag %q in help output", flag)
+		}
+	}
+}
+
+func TestAlbumsFinalizeHelp(t *testing.T) {
+	root := newRootCmd()
+	output, err := testExecute(root, "albums-finalize", "--help")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(output, "albums-finalize") {
+		t.Errorf("expected albums-finalize in help output")
+	}
+}
+
+func TestAlbumsFinalizeNoDatabase(t *testing.T) {
+	root := newRootCmd()
+	_, err := testExecute(root, "albums-finalize", "--state-dir", "/nonexistent/path/that/does/not/exist")
+	if err == nil {
+		t.Fatal("expected error when state directory does not exist")
 	}
 }

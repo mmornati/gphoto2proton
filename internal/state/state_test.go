@@ -126,6 +126,112 @@ func TestResetFailed(t *testing.T) {
 	}
 }
 
+func TestRecordAlbumMembership(t *testing.T) {
+	tracker, _ := newTracker(t, "session-1")
+	defer tracker.Close()
+
+	ctx := context.Background()
+	if err := tracker.RecordAlbumMembership(ctx, "Vacation", "img_001.jpg"); err != nil {
+		t.Fatalf("RecordAlbumMembership failed: %v", err)
+	}
+	if err := tracker.RecordAlbumMembership(ctx, "Vacation", "img_002.jpg"); err != nil {
+		t.Fatalf("RecordAlbumMembership failed: %v", err)
+	}
+	if err := tracker.RecordAlbumMembership(ctx, "Family", "img_001.jpg"); err != nil {
+		t.Fatalf("RecordAlbumMembership failed: %v", err)
+	}
+}
+
+func TestRecordAlbumMembershipIdempotent(t *testing.T) {
+	tracker, _ := newTracker(t, "session-1")
+	defer tracker.Close()
+
+	ctx := context.Background()
+	if err := tracker.RecordAlbumMembership(ctx, "Vacation", "img_001.jpg"); err != nil {
+		t.Fatalf("first call failed: %v", err)
+	}
+	if err := tracker.RecordAlbumMembership(ctx, "Vacation", "img_001.jpg"); err != nil {
+		t.Fatalf("duplicate call failed: %v", err)
+	}
+}
+
+func TestAccumulatedAlbums(t *testing.T) {
+	tracker, _ := newTracker(t, "session-1")
+	defer tracker.Close()
+
+	ctx := context.Background()
+	_ = tracker.RecordAlbumMembership(ctx, "Vacation", "img_001.jpg")
+	_ = tracker.RecordAlbumMembership(ctx, "Vacation", "img_002.jpg")
+	_ = tracker.RecordAlbumMembership(ctx, "Family", "img_001.jpg")
+
+	albums, err := tracker.AccumulatedAlbums(ctx)
+	if err != nil {
+		t.Fatalf("AccumulatedAlbums failed: %v", err)
+	}
+	if len(albums) != 2 {
+		t.Fatalf("expected 2 albums, got %d", len(albums))
+	}
+	byName := make(map[string]domain.Album)
+	for _, a := range albums {
+		byName[a.Name] = a
+	}
+	if a, ok := byName["Vacation"]; !ok {
+		t.Fatal("expected Vacation album")
+	} else if len(a.FileIDs) != 2 {
+		t.Fatalf("expected 2 files in Vacation, got %d", len(a.FileIDs))
+	}
+	if a, ok := byName["Family"]; !ok {
+		t.Fatal("expected Family album")
+	} else if len(a.FileIDs) != 1 {
+		t.Fatalf("expected 1 file in Family, got %d", len(a.FileIDs))
+	}
+}
+
+func TestAccumulatedAlbumsEmpty(t *testing.T) {
+	tracker, _ := newTracker(t, "session-1")
+	defer tracker.Close()
+
+	albums, err := tracker.AccumulatedAlbums(context.Background())
+	if err != nil {
+		t.Fatalf("AccumulatedAlbums failed: %v", err)
+	}
+	if len(albums) != 0 {
+		t.Fatalf("expected 0 albums, got %d", len(albums))
+	}
+}
+
+func TestAccumulatedAlbumsCrossSession(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "shared.db")
+	trackerA, errA := NewSQLiteTracker(dbPath)
+	if errA != nil {
+		t.Fatalf("NewSQLiteTracker A failed: %v", errA)
+	}
+	defer trackerA.Close()
+	_ = trackerA.Init(context.Background(), "session-a")
+
+	trackerB, errB := NewSQLiteTracker(dbPath)
+	if errB != nil {
+		t.Fatalf("NewSQLiteTracker B failed: %v", errB)
+	}
+	defer trackerB.Close()
+	_ = trackerB.Init(context.Background(), "session-b")
+
+	ctx := context.Background()
+	_ = trackerA.RecordAlbumMembership(ctx, "Shared", "img_a.jpg")
+	_ = trackerB.RecordAlbumMembership(ctx, "Shared", "img_b.jpg")
+
+	albums, err := trackerA.AccumulatedAlbums(ctx)
+	if err != nil {
+		t.Fatalf("AccumulatedAlbums failed: %v", err)
+	}
+	if len(albums) != 1 {
+		t.Fatalf("expected 1 album across sessions, got %d", len(albums))
+	}
+	if len(albums[0].FileIDs) != 2 {
+		t.Fatalf("expected 2 files across sessions, got %d", len(albums[0].FileIDs))
+	}
+}
+
 func TestMigrator_UpAndDown(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "migrate.db")
 	m := NewMigrator(dbPath)
