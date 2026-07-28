@@ -1,0 +1,63 @@
+site_name: gphoto2proton
+site_description: "Migrate Google Photos Takeout archives to Proton Drive"
+site_author: "Massimo Mornati"
+site_url: https://mmornati.github.io/gphoto2proton
+
+repo_name: mmornati/gphoto2proton
+repo_url: https://github.com/mmornati/gphoto2proton
+edit_uri: https://github.com/mmornati/gphoto2proton/edit/main/docs/
+
+copyright: "Copyright &copy; 2026 Massimo Mornati"
+
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: indigo
+  font:
+    static: true
+  icon:
+    repo: fontawesome/brands/github
+  logo: https://img.icons8.com/fluency/96/google-photos.png
+  favicon: https://img.icons8.com/fluency/96/google-photos.png
+
+nav:
+  - Home: index.md
+  - Installation: installation.md
+  - Quick Start: quickstart.md
+  - Commands: commands.md
+  - Configuration: configuration.md
+  - How It Works: how-it-works.md
+  - Architecture: architecture.md
+  - Troubleshooting: troubleshooting.md
+  - FAQ: faq.md
+
+markdown_extensions:
+  - attr_list
+  - codehilite
+  - toc:
+      permalink: true
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+plugins:
+  - search:
+      separator: '[\s\-\.]+'
+  - mermaid2
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/mmornati/gphoto2proton
+
+extra_css:
+  - stylesheets/extra.css
