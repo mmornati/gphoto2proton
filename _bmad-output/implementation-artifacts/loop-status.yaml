@@ -1,7 +1,7 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
 total_stories: 8
-current_index: 6
+current_index: 7
 stories:
   - key: "1-1"
     status: merged
@@ -107,11 +107,15 @@ stories:
       - "_bmad-output/planning-artifacts/epics.md"
       - "_bmad-output/planning-artifacts/research/photos-api-probe-2026-07-27.md"
   - key: "2-1"
-    status: pr-in-progress
-    commit: "8e355ccf9296fceacbb7d30cb775ad2985f96ef4"
+    status: merged
+    commit: "221e69c"
+    pr_number: 7
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/7"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
     files_changed:
       - "internal/domain/album.go"
-      - "internal/domain/pipeline.go"
       - "internal/takeout/metadata.go"
       - "internal/takeout/metadata_test.go"
       - "internal/takeout/stream.go"
@@ -119,6 +123,18 @@ stories:
       - "cmd/gphoto2proton/pipeline.go"
       - "cmd/gphoto2proton/pipeline_test.go"
       - "_bmad-output/implementation-artifacts/2-1-album-manifest-extraction.md"
-      - "_bmad-output/implementation-artifacts/loop-status.yaml"
   - key: "2-2"
-    status: pending
+    status: pr-in-progress
+    commit: "9af66a0ce4992faecc9177ddad1de43cac7a0065"
+    files_changed:
+      - "internal/proton/album.go"
+      - "internal/proton/album_test.go"
+      - "internal/proton/upload.go"
+      - "internal/proton/proton_test.go"
+      - "internal/domain/migration.go"
+      - "internal/port/state.go"
+      - "internal/state/sqlite.go"
+      - "internal/state/migrations.go"
+      - "cmd/gphoto2proton/pipeline.go"
+      - "cmd/gphoto2proton/pipeline_test.go"
+      - "_bmad-output/implementation-artifacts/2-2-album-recreation-proton.md"

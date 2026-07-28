@@ -31,6 +31,13 @@ func (m *Migrator) Up() error {
 			file_size  INTEGER NOT NULL DEFAULT 0,
 			error_msg  TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE IF NOT EXISTS album_states (
+			album_id   TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			state      INTEGER NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (album_id, session_id)
 		)
 	`)
 	return err
@@ -43,6 +50,9 @@ func (m *Migrator) Down() error {
 	}
 	defer db.Close()
 
-	_, err = db.Exec(`DROP TABLE IF EXISTS file_states`)
+	_, err = db.Exec(`
+		DROP TABLE IF EXISTS album_states;
+		DROP TABLE IF EXISTS file_states
+	`)
 	return err
 }

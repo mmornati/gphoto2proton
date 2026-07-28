@@ -22,9 +22,10 @@ package domain
 type State int
 
 const (
-	StatePending   State = iota
+	StatePending State = iota
 	StateProcessing
 	StateUploaded
 	StateFailed
 	StateSkipped
+	StateAlbumAttached
 )

@@ -34,6 +34,13 @@ func NewSQLiteTracker(dbPath string) (*SQLiteTracker, error) {
 			file_size  INTEGER NOT NULL DEFAULT 0,
 			error_msg  TEXT NOT NULL DEFAULT '',
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE IF NOT EXISTS album_states (
+			album_id   TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			state      INTEGER NOT NULL,
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (album_id, session_id)
 		)
 	`); err != nil {
 		db.Close()
@@ -55,6 +62,17 @@ func (s *SQLiteTracker) Record(ctx context.Context, fileID string, state domain.
 		   state = excluded.state,
 		   updated_at = datetime('now')`,
 		fileID, s.sessionID, state)
+	return err
+}
+
+func (s *SQLiteTracker) RecordAlbum(ctx context.Context, albumID string, state domain.State) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO album_states (album_id, session_id, state, updated_at)
+		 VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(album_id, session_id) DO UPDATE SET
+		   state = excluded.state,
+		   updated_at = datetime('now')`,
+		albumID, s.sessionID, state)
 	return err
 }
 
