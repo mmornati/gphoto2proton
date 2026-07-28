@@ -1,7 +1,7 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
 total_stories: 6
-current_index: 2
+current_index: 3
 stories:
   - key: "1-1"
     status: merged
@@ -48,7 +48,16 @@ stories:
       - "internal/takeout/metadata.go"
       - "internal/takeout/takeout_test.go"
   - key: "1-3"
-    status: dev-in-progress
+    status: merged
+    commit: "c7f31aa"
+    pr_number: 3
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/3"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
+    files_changed:
+      - "internal/exif/processor.go"
+      - "internal/exif/exif_test.go"
   - key: "1-4"
     status: pending
   - key: "1-5"

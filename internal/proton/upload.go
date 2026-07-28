@@ -1,42 +1,131 @@
-// Copyright (c) 2026 mmornati
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
 package proton
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
+	"time"
 
+	"github.com/henrybear327/Proton-API-Bridge"
+	"github.com/henrybear327/Proton-API-Bridge/common"
+	proton "github.com/henrybear327/go-proton-api"
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
 
-type Uploader struct{}
+var mimeTypes = map[string]string{
+	".jpg":  "image/jpeg",
+	".jpeg": "image/jpeg",
+	".png":  "image/png",
+	".heic": "image/heic",
+	".mov":  "video/quicktime",
+	".mp4":  "video/mp4",
+	".cr2":  "image/x-canon-cr2",
+	".nef":  "image/x-nikon-nef",
+	".arw":  "image/x-sony-arw",
+}
 
-func NewUploader() port.ProtonUploader {
-	return &Uploader{}
+type Uploader struct {
+	drive       *proton_api_bridge.ProtonDrive
+	credStore   *CredentialStore
+	username    string
+	password    string
+}
+
+func NewUploader(ctx context.Context, username, password string, credStore *CredentialStore) (port.ProtonUploader, error) {
+	config := common.NewConfigWithDefaultValues()
+	config.AppVersion = "gphoto2proton"
+	config.UserAgent = "gphoto2proton"
+
+	cred, err := credStore.Load()
+	if err == nil {
+		config.UseReusableLogin = true
+		config.ReusableCredential = &common.ReusableCredentialData{
+			UID:           cred.UID,
+			AccessToken:   cred.AccessToken,
+			RefreshToken:  cred.RefreshToken,
+			SaltedKeyPass: cred.SaltedKeyPass,
+		}
+	} else {
+		config.FirstLoginCredential = &common.FirstLoginCredentialData{
+			Username: username,
+			Password: password,
+		}
+	}
+
+	drive, driveCred, err := proton_api_bridge.NewProtonDrive(
+		ctx,
+		config,
+		func(auth proton.Auth) {},
+		func() {},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating proton drive: %w", err)
+	}
+
+	if driveCred != nil {
+		credStore.Save(CredentialData{
+			UID:           driveCred.UID,
+			AccessToken:   driveCred.AccessToken,
+			RefreshToken:  driveCred.RefreshToken,
+			SaltedKeyPass: driveCred.SaltedKeyPass,
+		})
+	}
+
+	return &Uploader{
+		drive:     drive,
+		credStore: credStore,
+		username:  username,
+		password:  password,
+	}, nil
 }
 
 func (u *Uploader) Upload(ctx context.Context, name string, r io.Reader) (string, error) {
-	return "", errors.New("not implemented")
+	folderID, err := u.ensureFolder(ctx, "gphoto2proton")
+	if err != nil {
+		return "", fmt.Errorf("ensuring folder: %w", err)
+	}
+
+	fileID, _, err := u.drive.UploadFileByReader(
+		ctx,
+		folderID,
+		name,
+		time.Now(),
+		r,
+		0,
+	)
+	if err != nil {
+		return "", fmt.Errorf("uploading file: %w", err)
+	}
+
+	return fileID, nil
 }
 
 func (u *Uploader) CreateAlbum(ctx context.Context, name string, fileIDs []string) (string, error) {
-	return "", errors.New("not implemented")
+	return "", fmt.Errorf("not implemented")
+}
+
+func (u *Uploader) ensureFolder(ctx context.Context, folderName string) (string, error) {
+	rootID := u.drive.RootLink.LinkID
+
+	existing, err := u.drive.SearchByNameInActiveFolderByID(ctx, rootID, folderName, false, true, 0)
+	if err == nil && existing != nil {
+		return existing.LinkID, nil
+	}
+
+	folderID, err := u.drive.CreateNewFolderByID(ctx, rootID, folderName)
+	if err != nil {
+		return "", fmt.Errorf("creating folder %s: %w", folderName, err)
+	}
+
+	return folderID, nil
+}
+
+func mimeType(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	if mime, ok := mimeTypes[ext]; ok {
+		return mime
+	}
+	return "application/octet-stream"
 }
