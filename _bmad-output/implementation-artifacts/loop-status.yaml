@@ -1,7 +1,7 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
 total_stories: 6
-current_index: 3
+current_index: 4
 stories:
   - key: "1-1"
     status: merged
@@ -59,7 +59,22 @@ stories:
       - "internal/exif/processor.go"
       - "internal/exif/exif_test.go"
   - key: "1-4"
-    status: pending
+    status: merged
+    commit: "63eac39"
+    pr_number: 4
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/4"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
+    files_changed:
+      - "internal/proton/auth.go"
+      - "internal/proton/upload.go"
+      - "internal/proton/album.go"
+      - "internal/proton/proton_test.go"
+      - "_bmad-output/implementation-artifacts/1-4-proton-upload.md"
+      - "_bmad-output/implementation-artifacts/loop-status.yaml"
+      - "go.mod"
+      - "go.sum"
   - key: "1-5"
     status: pending
   - key: "1-6"
