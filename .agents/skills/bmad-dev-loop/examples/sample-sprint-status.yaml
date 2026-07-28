@@ -1,0 +1,53 @@
+# Sample sprint-status.yaml
+#
+# Drop this into your `{implementation_artifacts}/` folder and run
+# `/bmad-dev-loop 4-1 4-2 4-3` or `/bmad-dev-loop epic-4` to feed the
+# sample. Used by docs/examples/sample-sprint.md and the end-to-end
+# walkthrough.
+
+generated: "2026-07-18T19:00:00Z"
+project: Sample Project
+tracking_system: local-files
+
+# Top-level development_status is the granular table; `epics` carries
+# the structural view used for epic-N expansion.
+development_status:
+  "4-1-dry-run-mode": ready-for-dev
+  "4-2-posix-compliant-cli": ready-for-dev
+  "4-3-ide-extension-socket": ready-for-dev
+  "4-4-cost-attribution-report": in-progress
+  "5-1-token-savings-calculator": review
+  "5-2-cost-budget-alerts": done
+
+epics:
+  - id: 4
+    title: Dry-run & CLI hardening
+    stories:
+      - key: "4-1"
+        title: dry-run-mode
+        status: ready-for-dev
+        file: "4-1-dry-run-mode.md"
+      - key: "4-2"
+        title: posix-compliant-cli
+        status: ready-for-dev
+        file: "4-2-posix-compliant-cli.md"
+      - key: "4-3"
+        title: ide-extension-socket
+        status: ready-for-dev
+        file: "4-3-ide-extension-socket.md"
+      - key: "4-4"
+        title: cost-attribution-report
+        status: in-progress
+        file: "4-4-cost-attribution-report.md"
+
+  - id: 5
+    title: Token economics
+    stories:
+      - key: "5-1"
+        title: token-savings-calculator
+        status: review
+        file: "5-1-token-savings-calculator.md"
+      - key: "5-2"
+        title: cost-budget-alerts
+        status: done
+        file: "5-2-cost-budget-alerts.md"
