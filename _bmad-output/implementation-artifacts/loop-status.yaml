@@ -1,7 +1,7 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
 total_stories: 8
-current_index: 6
+current_index: 7
 stories:
   - key: "1-1"
     status: merged
@@ -124,4 +124,4 @@ stories:
       - "cmd/gphoto2proton/pipeline_test.go"
       - "_bmad-output/implementation-artifacts/2-1-album-manifest-extraction.md"
   - key: "2-2"
-    status: pending
+    status: dev-in-progress

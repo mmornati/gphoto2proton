@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/mmornati/gphoto2proton/internal/domain"
 	"github.com/mmornati/gphoto2proton/internal/port"
@@ -32,7 +33,11 @@ import (
 type Pipeline struct {
 	Reader   port.TakeoutReader
 	Uploader port.ProtonUploader
+	State    port.StateTracker
 	OnAlbums domain.AlbumHandler
+	Logger   *slog.Logger
+
+	fileIDMap map[string]string
 }
 
 func (p *Pipeline) Run(ctx context.Context) error {
@@ -40,10 +45,25 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return errors.New("pipeline: reader is required")
 	}
 
+	p.fileIDMap = make(map[string]string)
+
+	if err := p.uploadAll(ctx); err != nil {
+		return err
+	}
+
+	albums, err := p.Reader.AlbumManifest(ctx)
+	if err != nil {
+		return fmt.Errorf("pipeline: extracting album manifest: %w", err)
+	}
+
+	return p.createAlbums(ctx, albums)
+}
+
+func (p *Pipeline) uploadAll(ctx context.Context) error {
 	for {
 		media, rc, err := p.Reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
-			break
+			return nil
 		}
 		if err != nil {
 			return fmt.Errorf("pipeline: reading next media: %w", err)
@@ -52,19 +72,6 @@ func (p *Pipeline) Run(ctx context.Context) error {
 			return err
 		}
 	}
-
-	albums, err := p.Reader.AlbumManifest(ctx)
-	if err != nil {
-		return fmt.Errorf("pipeline: extracting album manifest: %w", err)
-	}
-
-	if p.OnAlbums != nil {
-		if err := p.OnAlbums(ctx, albums); err != nil {
-			return fmt.Errorf("pipeline: handling albums: %w", err)
-		}
-	}
-
-	return nil
 }
 
 func (p *Pipeline) processMedia(ctx context.Context, media *domain.Media, rc io.ReadCloser) error {
@@ -76,10 +83,82 @@ func (p *Pipeline) processMedia(ctx context.Context, media *domain.Media, rc io.
 	}
 	defer rc.Close()
 
-	if p.Uploader != nil {
-		if _, err := p.Uploader.Upload(ctx, media.Filename, rc); err != nil {
-			return fmt.Errorf("pipeline: uploading %s: %w", media.Filename, err)
+	if p.Uploader == nil {
+		return nil
+	}
+	fileID, err := p.Uploader.Upload(ctx, media.Filename, rc)
+	if err != nil {
+		return fmt.Errorf("pipeline: uploading %s: %w", media.Filename, err)
+	}
+	if fileID != "" {
+		p.fileIDMap[media.Filename] = fileID
+	}
+	return nil
+}
+
+func (p *Pipeline) createAlbums(ctx context.Context, albums []domain.Album) error {
+	if p.OnAlbums != nil {
+		return p.OnAlbums(ctx, albums)
+	}
+	if p.Uploader == nil {
+		return nil
+	}
+
+	for _, album := range albums {
+		protonFileIDs := p.translateFileIDs(album.FileIDs)
+		if len(protonFileIDs) == 0 {
+			p.logger().Warn("skipping album with no Proton file IDs",
+				slog.String("album", album.Name),
+				slog.Int("takeout_file_ids", len(album.FileIDs)),
+			)
+			continue
+		}
+
+		albumID, err := p.Uploader.CreateAlbum(ctx, album.Name, protonFileIDs)
+		if err != nil {
+			p.logger().Error("album creation failed",
+				slog.String("album", album.Name),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+
+		if p.State != nil {
+			if err := p.State.Record(ctx, albumID, domain.StateAlbumAttached); err != nil {
+				p.logger().Warn("recording album state failed",
+					slog.String("album", album.Name),
+					slog.String("album_id", albumID),
+					slog.String("error", err.Error()),
+				)
+			}
 		}
 	}
 	return nil
+}
+
+func (p *Pipeline) translateFileIDs(takeoutIDs []string) []string {
+	if len(takeoutIDs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(takeoutIDs))
+	seen := make(map[string]bool, len(takeoutIDs))
+	for _, takeoutID := range takeoutIDs {
+		if takeoutID == "" || seen[takeoutID] {
+			continue
+		}
+		seen[takeoutID] = true
+		protonID, ok := p.fileIDMap[takeoutID]
+		if !ok {
+			continue
+		}
+		out = append(out, protonID)
+	}
+	return out
+}
+
+func (p *Pipeline) logger() *slog.Logger {
+	if p.Logger != nil {
+		return p.Logger
+	}
+	return slog.Default()
 }

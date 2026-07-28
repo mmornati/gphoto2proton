@@ -31,6 +31,7 @@ type Uploader struct {
 	credStore   *CredentialStore
 	username    string
 	password    string
+	albumClient *AlbumAdapter
 }
 
 func NewUploader(ctx context.Context, username, password string, credStore *CredentialStore) (port.ProtonUploader, error) {
@@ -74,11 +75,19 @@ func NewUploader(ctx context.Context, username, password string, credStore *Cred
 	}
 
 	return &Uploader{
-		drive:     drive,
-		credStore: credStore,
-		username:  username,
-		password:  password,
+		drive:       drive,
+		credStore:   credStore,
+		username:    username,
+		password:    password,
+		albumClient: NewAlbumAdapter(credStore, username),
 	}, nil
+}
+
+// AttachAlbumAdapter wires an externally constructed AlbumAdapter to the
+// Uploader. Used when the caller needs to override defaults (e.g. test
+// HTTP transport, custom retry settings) without going through NewUploader.
+func (u *Uploader) AttachAlbumAdapter(adapter *AlbumAdapter) {
+	u.albumClient = adapter
 }
 
 func (u *Uploader) Upload(ctx context.Context, name string, r io.Reader) (string, error) {
@@ -103,7 +112,10 @@ func (u *Uploader) Upload(ctx context.Context, name string, r io.Reader) (string
 }
 
 func (u *Uploader) CreateAlbum(ctx context.Context, name string, fileIDs []string) (string, error) {
-	return "", fmt.Errorf("not implemented")
+	if u.albumClient == nil {
+		return "", fmt.Errorf("album: adapter not configured")
+	}
+	return u.albumClient.CreateAlbum(ctx, name, fileIDs)
 }
 
 func (u *Uploader) ensureFolder(ctx context.Context, folderName string) (string, error) {
