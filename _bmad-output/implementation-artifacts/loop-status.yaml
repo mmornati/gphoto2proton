@@ -124,4 +124,14 @@ stories:
       - "cmd/gphoto2proton/pipeline_test.go"
       - "_bmad-output/implementation-artifacts/2-1-album-manifest-extraction.md"
   - key: "2-2"
-    status: dev-in-progress
+    status: in-progress
+    commit: "9af66a0ce4992faecc9177ddad1de43cac7a0065"
+    files_changed:
+      - "internal/proton/album.go"
+      - "internal/proton/album_test.go"
+      - "internal/proton/upload.go"
+      - "internal/proton/proton_test.go"
+      - "internal/domain/migration.go"
+      - "cmd/gphoto2proton/pipeline.go"
+      - "cmd/gphoto2proton/pipeline_test.go"
+      - "_bmad-output/implementation-artifacts/2-2-album-recreation-proton.md"

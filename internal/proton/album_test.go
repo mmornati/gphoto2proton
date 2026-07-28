@@ -407,6 +407,222 @@ func TestAlbumAdapterNextBackoffDoubles(t *testing.T) {
 	}
 }
 
+func TestAlbumAdapterHonoursRetryAfterHeader(t *testing.T) {
+	var (
+		createCalls int32
+		photosCalls int32
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/photos/v1/albums":
+			atomic.AddInt32(&createCalls, 1)
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(createAlbumResponse{
+				Code:  1000,
+				Album: &albumResult{ID: "album-ra", Name: "RA"},
+			}); err != nil {
+				t.Fatalf("encoding: %v", err)
+			}
+		case "/photos/v1/albums/album-ra/photos":
+			n := atomic.AddInt32(&photosCalls, 1)
+			if n == 1 {
+				w.Header().Set("Retry-After", "2")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	const retryAfter = 2 * time.Second
+	sleeps := make(chan time.Duration, 4)
+	dir := t.TempDir()
+	store := NewCredentialStore(dir)
+	if err := store.Save(CredentialData{UID: "u", AccessToken: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAlbumAdapter(store, "x",
+		WithAlbumAPIBase(server.URL),
+		WithAlbumRetryConfig(3, retryAfter, 10*time.Second),
+		WithAlbumClock(time.Now, func(_ context.Context, d time.Duration) error {
+			sleeps <- d
+			return nil
+		}),
+	)
+
+	if _, err := adapter.CreateAlbum(context.Background(), "RA", []string{"p1"}); err != nil {
+		t.Fatalf("CreateAlbum failed: %v", err)
+	}
+	close(sleeps)
+	var observed time.Duration
+	for d := range sleeps {
+		if d > observed {
+			observed = d
+		}
+	}
+	if observed < retryAfter {
+		t.Errorf("expected sleep >= %s (Retry-After value), got %s", retryAfter, observed)
+	}
+	if got := atomic.LoadInt32(&photosCalls); got != 2 {
+		t.Errorf("expected 2 photos calls (1 retry), got %d", got)
+	}
+}
+
+func TestAlbumAdapterRetriesUseExponentialBackoffWhenHeaderAbsent(t *testing.T) {
+	var photosCalls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/photos/v1/albums":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(createAlbumResponse{
+				Code:  1000,
+				Album: &albumResult{ID: "album-eb", Name: "EB"},
+			}); err != nil {
+				t.Fatalf("encoding: %v", err)
+			}
+		default:
+			n := atomic.AddInt32(&photosCalls, 1)
+			if n < 3 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer server.Close()
+
+	var sleeps []time.Duration
+	var mu sync.Mutex
+	adapter := newTestAlbumAdapter(t, server.URL,
+		WithAlbumRetryConfig(3, 5*time.Millisecond, 80*time.Millisecond),
+		WithAlbumClock(time.Now, func(_ context.Context, d time.Duration) error {
+			mu.Lock()
+			sleeps = append(sleeps, d)
+			mu.Unlock()
+			return nil
+		}),
+	)
+
+	if _, err := adapter.CreateAlbum(context.Background(), "EB", []string{"p1"}); err != nil {
+		t.Fatalf("CreateAlbum failed: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sleeps) < 2 {
+		t.Fatalf("expected at least 2 sleeps (recoverable 5xx), got %d", len(sleeps))
+	}
+	for _, d := range sleeps {
+		if d > 80*time.Millisecond {
+			t.Errorf("sleep exceeded maxBackoff (80ms): %s", d)
+		}
+	}
+}
+
+func TestAlbumAdapterRollsBackAlbumWhenAddPhotosFails(t *testing.T) {
+	var (
+		deleteCalls int32
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/photos/v1/albums":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(createAlbumResponse{
+				Code:  1000,
+				Album: &albumResult{ID: "album-rb", Name: "RB"},
+			}); err != nil {
+				t.Fatalf("encoding: %v", err)
+			}
+		case "/photos/v1/albums/album-rb/photos":
+			w.WriteHeader(http.StatusBadRequest)
+			if _, err := w.Write([]byte(`{"Code":1001,"Error":"bad request"}`)); err != nil {
+				t.Fatalf("writing: %v", err)
+			}
+		case "/photos/v1/albums/album-rb":
+			if r.Method != http.MethodDelete {
+				t.Errorf("expected DELETE for rollback, got %s", r.Method)
+			}
+			atomic.AddInt32(&deleteCalls, 1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	adapter := newTestAlbumAdapter(t, server.URL, WithAlbumRetryConfig(0, 1*time.Millisecond, 5*time.Millisecond))
+	albumID, err := adapter.CreateAlbum(context.Background(), "RB", []string{"p1"})
+	if err == nil {
+		t.Fatal("expected error when addPhotos fails")
+	}
+	if !strings.Contains(err.Error(), "rolled back") {
+		t.Errorf("expected rollback message, got: %v", err)
+	}
+	if albumID != "album-rb" {
+		t.Errorf("expected albumID even on rollback failure, got %q", albumID)
+	}
+	if got := atomic.LoadInt32(&deleteCalls); got != 1 {
+		t.Errorf("expected 1 rollback DELETE, got %d", got)
+	}
+}
+
+func TestAlbumAdapterPreservesAlbumOnRollbackFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/photos/v1/albums":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(createAlbumResponse{
+				Code:  1000,
+				Album: &albumResult{ID: "album-keep", Name: "Keep"},
+			}); err != nil {
+				t.Fatalf("encoding: %v", err)
+			}
+		case "/photos/v1/albums/album-keep/photos":
+			w.WriteHeader(http.StatusBadRequest)
+		case "/photos/v1/albums/album-keep":
+			w.WriteHeader(http.StatusInternalServerError)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	adapter := newTestAlbumAdapter(t, server.URL, WithAlbumRetryConfig(0, 1*time.Millisecond, 5*time.Millisecond))
+	_, err := adapter.CreateAlbum(context.Background(), "Keep", []string{"p1"})
+	if err == nil {
+		t.Fatal("expected error when both addPhotos and rollback fail")
+	}
+	if !strings.Contains(err.Error(), "album exists without photos") {
+		t.Errorf("expected 'album exists without photos' message, got: %v", err)
+	}
+}
+
+func TestAlbumAdapterWithAlbumRetryConfigClampsNegativeValues(t *testing.T) {
+	dir := t.TempDir()
+	store := NewCredentialStore(dir)
+	if err := store.Save(CredentialData{UID: "u", AccessToken: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	adapter := NewAlbumAdapter(store, "x",
+		WithAlbumAPIBase("http://example.invalid"),
+		WithAlbumRetryConfig(-1, -5*time.Second, -10*time.Second),
+	)
+	if adapter.maxRetries != 0 {
+		t.Errorf("expected maxRetries clamped to 0, got %d", adapter.maxRetries)
+	}
+	if adapter.initialBackoff != 0 {
+		t.Errorf("expected initialBackoff clamped to 0, got %s", adapter.initialBackoff)
+	}
+	if adapter.maxBackoff != 0 {
+		t.Errorf("expected maxBackoff clamped to 0, got %s", adapter.maxBackoff)
+	}
+}
+
 func TestAlbumAdapterAttachToUploader(t *testing.T) {
 	t.Skip("Uploader requires live Proton credentials; covered by integration tests")
 }

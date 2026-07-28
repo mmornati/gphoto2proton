@@ -124,7 +124,7 @@ func (p *Pipeline) createAlbums(ctx context.Context, albums []domain.Album) erro
 		}
 
 		if p.State != nil {
-			if err := p.State.Record(ctx, albumID, domain.StateAlbumAttached); err != nil {
+			if err := p.State.RecordAlbum(ctx, albumID, domain.StateAlbumAttached); err != nil {
 				p.logger().Warn("recording album state failed",
 					slog.String("album", album.Name),
 					slog.String("album_id", albumID),

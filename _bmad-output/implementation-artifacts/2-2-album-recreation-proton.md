@@ -4,7 +4,7 @@ baseline_commit: 33f8ef4d5145a70abc703f635085561d3667ae09
 
 # Story 2.2: Album Recreation in Proton Photos
 
-Status: review
+Status: in-progress
 
 ## Story
 
@@ -222,3 +222,68 @@ is clean. `gofmt -l` is clean for the touched files.
   success. All four acceptance criteria plus edge cases are covered by
   tests; `go test ./... -race` runs 108 tests green, `go vet ./...`
   clean.
+- 2026-07-28 — Review-driven fixes landed on top of the implementation:
+  - HIGH: `doRequest` now actually honours `Retry-After` by setting the
+    next sleep from the parsed delay (capped by `maxBackoff`) when it is
+    present and non-zero; falls back to exponential backoff otherwise.
+    Refactored into `doRequestMethod` to also serve `DELETE /albums/{id}`
+    for the rollback path.
+  - MEDIUM: When `addPhotos` fails, `CreateAlbum` rolls back by deleting
+    the newly created album via `DELETE /photos/v1/albums/{id}`. If the
+    rollback itself fails the error message makes clear that the album
+    exists without photos so `--resume` can re-attach.
+  - MEDIUM: Album state is now persisted to a dedicated `album_states`
+    table through `StateTracker.RecordAlbum`, so `file_states.file_id` no
+    longer mixes albums with file IDs and `--resume` semantics stay clean.
+    The port interface, SQLite tracker, migrator, and pipeline were
+    updated; the fake tracker in `pipeline_test.go` exposes `RecordAlbum`
+    too.
+  - LOW: `WithAlbumRetryConfig` clamps negative inputs to 0 instead of
+    silently keeping the defaults (and now always overrides even when
+    zero, matching the option's "override" name).
+  - LOW: `Retry-After` test gap closed. `TestAlbumAdapterHonoursRetryAfterHeader`
+    asserts a `Retry-After: 2` causes a ≥2s sleep before the next request,
+    and `TestAlbumAdapterRetriesUseExponentialBackoffWhenHeaderAbsent`
+    guards the fallback path.
+  - Verification: `go test ./... -race` → 113/113 green across 8
+    packages; `go vet ./...` clean; `gofmt -l` clean for touched files.
+
+## Review Findings
+
+Status: review → in-progress (unresolved patches)
+
+Reviewed: commit `9af66a0` against baseline `33f8ef4`. `go test ./... -race` 108/108 green; `go vet ./...` clean.
+
+### Intent Gap (spec promise vs. behaviour)
+
+- [x] [Review][Patch][intent_gap] Retry-After header is parsed but never honoured in the retry loop — `internal/proton/album.go:243` captures `Retry-After` into `retryableError.delay`, but `doRequest` only consults its own `delay`/`nextBackoff` schedule (1s, 2s, 4s, …, capped at 30s). When Proton returns `429` with `Retry-After: 120`, the adapter will keep hammering at ≤30s intervals instead of waiting 120s. The doc-comment on the type and the story's "Implementation Plan" both claim the header is honoured. AC3 ("without rate-limit errors") is at risk under real server throttling. Suggest: pull `retryableError.delay` out in `doRequest` and use `max(parsedDelay, delay)` (still capped by `maxBackoff`). Add a test that asserts a server-supplied `Retry-After: 2` causes the sleep to wait at least 2s. — Fixed: `doRequestMethod` reads `retryable.delay` (capped at `maxBackoff`) when present; otherwise it falls back to exponential backoff. New `TestAlbumAdapterHonoursRetryAfterHeader` and `TestAlbumAdapterRetriesUseExponentialBackoffWhenHeaderAbsent` cover both paths.
+
+- [x] [Review][Patch][intent_gap] StateTracker records album IDs under the `file_id` column — `cmd/gphoto2proton/pipeline.go:127` calls `p.State.Record(ctx, albumID, domain.StateAlbumAttached)`. The SQLite schema (`internal/state/sqlite.go:30`) stores this in `file_states.file_id`, mixing file and album rows. `FileStates(sessionID)` will return both interleaved; resume semantics in AD-9 assume `file_id` identifies a file. Two entity types sharing one column is a domain leak that will surface during `--resume`. Suggest: add an `entity_type` column (or a parallel `album_states` table), or document the convention in AD-9. — Fixed: chose the parallel-table option for the smallest blast radius. New `album_states` table (`album_id`, `session_id`, `state`, `updated_at`; PK `(album_id, session_id)`) is created alongside `file_states` in `NewSQLiteTracker` and `Migrator.Up`. The pipeline now calls `StateTracker.RecordAlbum` (new port method) so file and album state stay disjoint.
+
+### Patch
+
+- [x] [Review][Patch] AddPhotos failure leaves a half-created album on Proton Photos — `internal/proton/album.go:147-165`. If `createAlbum` succeeds but `addPhotosToAlbum` fails (e.g., 4xx for a deleted Proton file), `CreateAlbum` returns `(albumID, error)`. The pipeline logs and continues; the album is left visible with zero member photos. Suggest: either roll back (DELETE the album) on photos failure, or surface a distinct error so the pipeline can decide. Add a test for this path. — Fixed: chose rollback via `DELETE /photos/v1/albums/{id}`. New `deleteAlbum` method uses the same retry-aware `doRequestMethod`. If the rollback fails the returned error states explicitly that the album exists without photos, so `--resume` (which will re-run `CreateAlbum` and re-attach photos) is the natural follow-up. Tests: `TestAlbumAdapterRollsBackAlbumWhenAddPhotosFails` (rollback success), `TestAlbumAdapterPreservesAlbumOnRollbackFailure` (rollback also fails → message warns about orphan).
+
+- [x] [Review][Patch] `WithAlbumRetryConfig` silently coerces negative values — `internal/proton/album.go:74-86`. Passing `WithAlbumRetryConfig(-1, 0, 0)` keeps the defaults (5 retries, 1s/30s). The function name implies override. Suggest: document the validation, or panic on negative values to fail loud. — Fixed: negative values are clamped to 0 so an explicit `0` (meaning "no retries") is honoured and negative inputs cannot sneak past validation. The function now always writes the (clamped) value instead of only writing positive ones. Test: `TestAlbumAdapterWithAlbumRetryConfigClampsNegativeValues`.
+
+- [x] [Review][Patch] Retry-After test gap — `internal/proton/album_test.go:383-396` covers parsing only. No test asserts the parsed value influences `doRequest`. Closing the intent-gap fix above should land with a paired test (e.g., a 429 with `Retry-After: 2` should sleep ≥2s). — Fixed: see `TestAlbumAdapterHonoursRetryAfterHeader` above.
+
+### Defer
+
+- [x] [Review][Defer] `AttachAlbumAdapter` is dead code — `internal/proton/upload.go:89`. No production or test caller in the repository. Useful escape hatch but unused. — deferred, pre-existing
+- [x] [Review][Defer] `TestAlbumAdapterAttachToUploader` is a skip-only stub — `internal/proton/album_test.go:410`. No assertion. Remove or implement. — deferred, pre-existing test cleanup
+
+### Rejected
+
+- `nextBackoff` integer overflow on extreme inputs — `internal/proton/album.go:311`. Theoretical only; default inputs never approach `int64/2`. Noise.
+- `TestAlbumAdapterConcurrentAlbumsSequential` runs concurrently despite the name — `internal/proton/album_test.go:414-458`. The assertion is non-trivial (proves no data race under `-race`); renaming is cosmetic.
+- Empty Proton fileIDs after dedup still creates an album — `internal/proton/album.go:157-159`. Intentional per the AC1 edge-case test; Proton may later reject empty albums but that is server-side.
+
+### Summary
+
+- High: 1 (Retry-After not honoured) — fixed
+- Medium: 2 (StateTracker schema leak, half-created album on partial failure) — both fixed
+- Low (patch): 2 (Retry-After test gap, negative-value coercion)
+- Defer: 2
+- Reject: 3
+- Total actionable: 5 patches

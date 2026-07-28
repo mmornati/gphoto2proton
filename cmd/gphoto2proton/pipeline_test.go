@@ -680,6 +680,15 @@ func (f *fakeStateTracker) Record(ctx context.Context, fileID string, state doma
 	f.records = append(f.records, fakeStateRecord{fileID: fileID, state: state})
 	return nil
 }
+func (f *fakeStateTracker) RecordAlbum(ctx context.Context, albumID string, state domain.State) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.recordErr != nil {
+		return f.recordErr
+	}
+	f.records = append(f.records, fakeStateRecord{fileID: albumID, state: state})
+	return nil
+}
 func (f *fakeStateTracker) FileStates(ctx context.Context, sessionID string) ([]port.FileEntry, error) {
 	return nil, nil
 }

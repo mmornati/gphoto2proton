@@ -73,15 +73,18 @@ func WithAlbumHTTPClient(client *http.Client) AlbumAdapterOption {
 // WithAlbumRetryConfig overrides the retry/backoff settings.
 func WithAlbumRetryConfig(maxRetries int, initialBackoff, maxBackoff time.Duration) AlbumAdapterOption {
 	return func(a *AlbumAdapter) {
-		if maxRetries >= 0 {
-			a.maxRetries = maxRetries
+		if maxRetries < 0 {
+			maxRetries = 0
 		}
-		if initialBackoff > 0 {
-			a.initialBackoff = initialBackoff
+		if initialBackoff < 0 {
+			initialBackoff = 0
 		}
-		if maxBackoff > 0 {
-			a.maxBackoff = maxBackoff
+		if maxBackoff < 0 {
+			maxBackoff = 0
 		}
+		a.maxRetries = maxRetries
+		a.initialBackoff = initialBackoff
+		a.maxBackoff = maxBackoff
 	}
 }
 
@@ -143,7 +146,9 @@ func contextSleep(ctx context.Context, d time.Duration) error {
 // Both calls honour Proton rate limits (HTTP 429) with exponential backoff:
 // 1s, 2s, 4s, 8s, up to 30s. Network errors and 5xx responses are also
 // retried. 4xx client errors (other than 429) are returned immediately
-// because they signal a programmer mistake that retrying will not fix.
+// because they signal a programmer mistake that retrying will not fix. If
+// attaching photos fails, the adapter attempts to delete the newly created
+// album so failed creation does not leave an empty album behind.
 func (a *AlbumAdapter) CreateAlbum(ctx context.Context, name string, fileIDs []string) (string, error) {
 	if name == "" {
 		return "", errors.New("album: name is required")
@@ -159,7 +164,15 @@ func (a *AlbumAdapter) CreateAlbum(ctx context.Context, name string, fileIDs []s
 	}
 
 	if err := a.addPhotosToAlbum(ctx, albumID, fileIDs); err != nil {
-		return albumID, fmt.Errorf("album: attaching photos to %s: %w", albumID, err)
+		rollbackErr := a.deleteAlbum(ctx, albumID)
+		if rollbackErr != nil {
+			return albumID, fmt.Errorf(
+				"album: attaching photos to %s failed; album exists without photos because rollback failed: %w",
+				albumID,
+				errors.Join(err, rollbackErr),
+			)
+		}
+		return albumID, fmt.Errorf("album: attaching photos to %s failed; album rolled back: %w", albumID, err)
 	}
 	return albumID, nil
 }
@@ -189,7 +202,16 @@ func (a *AlbumAdapter) addPhotosToAlbum(ctx context.Context, albumID string, fil
 	return a.doRequest(ctx, path, body, nil)
 }
 
+func (a *AlbumAdapter) deleteAlbum(ctx context.Context, albumID string) error {
+	path := fmt.Sprintf("/photos/v1/albums/%s", albumID)
+	return a.doRequestMethod(ctx, http.MethodDelete, path, nil, nil)
+}
+
 func (a *AlbumAdapter) doRequest(ctx context.Context, path string, body []byte, out interface{}) error {
+	return a.doRequestMethod(ctx, http.MethodPost, path, body, out)
+}
+
+func (a *AlbumAdapter) doRequestMethod(ctx context.Context, method, path string, body []byte, out interface{}) error {
 	var lastErr error
 	delay := a.initialBackoff
 	for attempt := 0; attempt <= a.maxRetries; attempt++ {
@@ -197,10 +219,9 @@ func (a *AlbumAdapter) doRequest(ctx context.Context, path string, body []byte, 
 			if err := a.sleep(ctx, delay); err != nil {
 				return err
 			}
-			delay = nextBackoff(delay, a.maxBackoff)
 		}
 
-		err := a.doOnce(ctx, path, body, out)
+		err := a.doOnce(ctx, method, path, body, out)
 		if err == nil {
 			return nil
 		}
@@ -208,17 +229,31 @@ func (a *AlbumAdapter) doRequest(ctx context.Context, path string, body []byte, 
 		if !shouldRetry(err) {
 			return err
 		}
+
+		var retryable *retryableError
+		if errors.As(err, &retryable) && retryable.delay > 0 {
+			delay = minDuration(retryable.delay, a.maxBackoff)
+		} else if attempt > 0 {
+			delay = nextBackoff(delay, a.maxBackoff)
+		}
 	}
 	return fmt.Errorf("album: exhausted %d retries: %w", a.maxRetries, lastErr)
 }
 
-func (a *AlbumAdapter) doOnce(ctx context.Context, path string, body []byte, out interface{}) error {
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func (a *AlbumAdapter) doOnce(ctx context.Context, method, path string, body []byte, out interface{}) error {
 	cred, err := a.credStore.Load()
 	if err != nil {
 		return fmt.Errorf("album: loading credentials: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiBase+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, method, a.apiBase+path, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("album: building request: %w", err)
 	}
