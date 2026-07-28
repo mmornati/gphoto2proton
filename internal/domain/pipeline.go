@@ -19,7 +19,13 @@
 // SOFTWARE.
 package domain
 
-type Pipeline struct{}
+import "context"
+
+type AlbumHandler func(ctx context.Context, albums []Album) error
+
+type Pipeline struct {
+	OnAlbums AlbumHandler
+}
 
 func NewPipeline() *Pipeline {
 	return &Pipeline{}

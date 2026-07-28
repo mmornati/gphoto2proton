@@ -19,7 +19,12 @@
 // SOFTWARE.
 package domain
 
+import "time"
+
 type Album struct {
-	ID    string
-	Title string
+	ID        string
+	Title     string
+	Name      string
+	FileIDs   []string
+	CreatedAt time.Time
 }

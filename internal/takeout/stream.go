@@ -14,16 +14,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mmornati/gphoto2proton/internal/domain"
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
-
-var mediaExtensions = map[string]bool{
-	".jpg": true, ".jpeg": true, ".png": true, ".gif": true,
-	".heic": true, ".mov": true, ".mp4": true,
-	".cr2": true, ".nef": true, ".arw": true,
-}
 
 type mediaEntry struct {
 	Name        string
@@ -40,6 +35,18 @@ type Reader struct {
 	cursor  int
 	mu      sync.Mutex
 	initErr error
+
+	albumIndex      map[string]albumAccumulator
+	albumIndexOrder []string
+}
+
+type albumAccumulator struct {
+	Title      string
+	Date       string
+	CreatedAt  time.Time
+	HasCreated bool
+	FileIDs    []string
+	seen       map[string]bool
 }
 
 func NewStreamReader(paths ...string) port.TakeoutReader {
@@ -118,20 +125,58 @@ func (r *Reader) scanAll() error {
 				continue
 			}
 			name := filepath.Base(hd.Name)
-			if !isMediaFile(name) {
+			if isMediaFile(name) {
+				var buf bytes.Buffer
+				if _, err := io.Copy(&buf, r.readers[r.current]); err != nil {
+					return fmt.Errorf("reading %s: %w", hd.Name, err)
+				}
+				sidecarPath := hd.Name + ".json"
+				r.entries = append(r.entries, mediaEntry{
+					Name:        name,
+					MediaPath:   hd.Name,
+					SidecarPath: sidecarPath,
+					Data:        buf.Bytes(),
+				})
 				continue
 			}
-			var buf bytes.Buffer
-			if _, err := io.Copy(&buf, r.readers[r.current]); err != nil {
-				return fmt.Errorf("reading %s: %w", hd.Name, err)
+			if IsTopLevelAlbumFile(hd.Name) {
+				data, err := io.ReadAll(r.readers[r.current])
+				if err != nil {
+					return fmt.Errorf("reading %s: %w", hd.Name, err)
+				}
+				albums, err := ParseTopLevelAlbum(bytes.NewReader(data))
+				if err != nil {
+					return fmt.Errorf("parsing top-level album %s: %w", hd.Name, err)
+				}
+				r.mergeAlbums(albums)
+				continue
 			}
-			sidecarPath := hd.Name + ".json"
-			r.entries = append(r.entries, mediaEntry{
-				Name:        name,
-				MediaPath:   hd.Name,
-				SidecarPath: sidecarPath,
-				Data:        buf.Bytes(),
-			})
+			if IsPerAlbumFile(hd.Name) {
+				data, err := io.ReadAll(r.readers[r.current])
+				if err != nil {
+					return fmt.Errorf("reading %s: %w", hd.Name, err)
+				}
+				album, err := ParsePerAlbumJSON(bytes.NewReader(data))
+				if err != nil {
+					return fmt.Errorf("parsing per-album JSON %s: %w", hd.Name, err)
+				}
+				if album.Name != "" {
+					r.mergeAlbums([]domain.Album{album})
+				}
+				continue
+			}
+			if IsPhotoSidecar(hd.Name) {
+				data, err := io.ReadAll(r.readers[r.current])
+				if err != nil {
+					return fmt.Errorf("reading sidecar %s: %w", hd.Name, err)
+				}
+				albums, err := ParseSidecarAlbums(bytes.NewReader(data))
+				if err != nil {
+					return fmt.Errorf("parsing sidecar albums %s: %w", hd.Name, err)
+				}
+				r.mergeAlbums(albums)
+				continue
+			}
 		}
 	}
 	r.current = 0
@@ -140,6 +185,38 @@ func (r *Reader) scanAll() error {
 	}
 	r.files = nil
 	return nil
+}
+
+func (r *Reader) mergeAlbums(albums []domain.Album) {
+	if r.albumIndex == nil {
+		r.albumIndex = make(map[string]albumAccumulator)
+	}
+	for _, a := range albums {
+		key := a.Name
+		if key == "" {
+			continue
+		}
+		acc, exists := r.albumIndex[key]
+		if !exists {
+			acc = albumAccumulator{
+				Title: a.Name,
+				seen:  make(map[string]bool),
+			}
+			r.albumIndexOrder = append(r.albumIndexOrder, key)
+		}
+		for _, id := range a.FileIDs {
+			if id == "" || acc.seen[id] {
+				continue
+			}
+			acc.seen[id] = true
+			acc.FileIDs = append(acc.FileIDs, id)
+		}
+		if !acc.HasCreated && !a.CreatedAt.IsZero() {
+			acc.CreatedAt = a.CreatedAt
+			acc.HasCreated = true
+		}
+		r.albumIndex[key] = acc
+	}
 }
 
 func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error) {
@@ -171,10 +248,31 @@ func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error)
 }
 
 func (r *Reader) AlbumManifest(ctx context.Context) ([]domain.Album, error) {
-	return nil, errors.New("not implemented")
-}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-func isMediaFile(name string) bool {
-	ext := strings.ToLower(filepath.Ext(name))
-	return mediaExtensions[ext]
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	if r.initErr != nil {
+		return nil, r.initErr
+	}
+
+	out := make([]domain.Album, 0, len(r.albumIndexOrder))
+	for _, key := range r.albumIndexOrder {
+		acc, ok := r.albumIndex[key]
+		if !ok {
+			continue
+		}
+		album := domain.Album{
+			Name:    acc.Title,
+			FileIDs: append([]string(nil), acc.FileIDs...),
+		}
+		if acc.HasCreated {
+			album.CreatedAt = acc.CreatedAt
+		}
+		out = append(out, album)
+	}
+	return out, nil
 }
