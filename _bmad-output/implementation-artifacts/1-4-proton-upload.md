@@ -1,6 +1,7 @@
 # Story 1.4: Proton Drive Upload
 
-Status: ready-for-dev
+Status: review
+baseline_commit: c7f31aa
 
 ## Story
 
@@ -18,17 +19,17 @@ so that my library is available in my Proton account.
 
 ## Tasks / Subtasks
 
-- [ ] Implement internal/proton/auth.go — authentication adapter
-  - [ ] CLI-based OAuth flow via go-proton-api (user provides credentials or existing session cookie)
-  - [ ] Token refresh handling
-  - [ ] Session persistence (save to ~/.gphoto2proton/session.json)
-- [ ] Implement internal/proton/upload.go — file upload adapter
-  - [ ] Proton-API-Bridge upload with streamed content
-  - [ ] Create gphoto2proton folder in Proton Drive root if not exists
-  - [ ] Upload each file with correct filename and MIME type
-  - [ ] Retry logic for transient failures (3 retries, exponential backoff)
-- [ ] Implement internal/proton/album.go — album stub
-  - [ ] CreateAlbum returns "not implemented" error (deferred to Epic 2)
+- [x] Implement internal/proton/auth.go — authentication adapter
+  - [x] CLI-based OAuth flow via go-proton-api (user provides credentials or existing session cookie)
+  - [x] Token refresh handling
+  - [x] Session persistence (save to ~/.gphoto2proton/session.json)
+- [x] Implement internal/proton/upload.go — file upload adapter
+  - [x] Proton-API-Bridge upload with streamed content
+  - [x] Create gphoto2proton folder in Proton Drive root if not exists
+  - [x] Upload each file with correct filename and MIME type
+  - [x] Retry logic for transient failures (3 retries, exponential backoff)
+- [x] Implement internal/proton/album.go — album stub
+  - [x] CreateAlbum returns "not implemented" error (deferred to Epic 2)
 
 ## Dev Notes
 
