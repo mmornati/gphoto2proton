@@ -56,7 +56,29 @@ func (p *Pipeline) Run(ctx context.Context) error {
 		return fmt.Errorf("pipeline: extracting album manifest: %w", err)
 	}
 
+	if err := p.recordAlbumMembership(ctx, albums); err != nil {
+		return err
+	}
+
 	return p.createAlbums(ctx, albums)
+}
+
+func (p *Pipeline) recordAlbumMembership(ctx context.Context, albums []domain.Album) error {
+	if p.State == nil {
+		return nil
+	}
+	for _, album := range albums {
+		for _, fileName := range album.FileIDs {
+			if err := p.State.RecordAlbumMembership(ctx, album.Name, fileName); err != nil {
+				p.logger().Warn("recording album membership failed",
+					slog.String("album", album.Name),
+					slog.String("file", fileName),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+	return nil
 }
 
 func (p *Pipeline) uploadAll(ctx context.Context) error {

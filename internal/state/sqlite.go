@@ -41,6 +41,13 @@ func NewSQLiteTracker(dbPath string) (*SQLiteTracker, error) {
 			state      INTEGER NOT NULL,
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			PRIMARY KEY (album_id, session_id)
+		);
+		CREATE TABLE IF NOT EXISTS album_members (
+			album_name TEXT NOT NULL,
+			file_name  TEXT NOT NULL,
+			session_id TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (album_name, file_name, session_id)
 		)
 	`); err != nil {
 		db.Close()
@@ -76,6 +83,62 @@ func (s *SQLiteTracker) RecordAlbum(ctx context.Context, albumID string, state d
 	return err
 }
 
+func (s *SQLiteTracker) RecordAlbumMembership(ctx context.Context, albumName, fileName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO album_members (album_name, file_name, session_id, updated_at)
+		 VALUES (?, ?, ?, datetime('now'))
+		 ON CONFLICT(album_name, file_name, session_id) DO UPDATE SET
+		   updated_at = datetime('now')`,
+		albumName, fileName, s.sessionID)
+	return err
+}
+
+func (s *SQLiteTracker) AccumulatedAlbums(ctx context.Context) ([]domain.Album, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT album_name, file_name FROM album_members
+		 ORDER BY album_name, file_name`)
+	if err != nil {
+		return nil, fmt.Errorf("querying accumulated albums: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []struct {
+		albumName string
+		fileName  string
+	}
+	for rows.Next() {
+		var e struct {
+			albumName string
+			fileName  string
+		}
+		if err := rows.Scan(&e.albumName, &e.fileName); err != nil {
+			return nil, fmt.Errorf("scanning album member: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	groups := make(map[string][]string)
+	order := make([]string, 0)
+	for _, e := range entries {
+		if _, ok := groups[e.albumName]; !ok {
+			order = append(order, e.albumName)
+		}
+		groups[e.albumName] = append(groups[e.albumName], e.fileName)
+	}
+
+	out := make([]domain.Album, 0, len(groups))
+	for _, name := range order {
+		out = append(out, domain.Album{
+			Name:    name,
+			FileIDs: groups[name],
+		})
+	}
+	return out, nil
+}
+
 func (s *SQLiteTracker) RecordFull(ctx context.Context, fileID string, state domain.State, fileName string, fileSize int64, errorMsg string) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO file_states (file_id, session_id, state, file_name, file_size, error_msg, updated_at)
@@ -91,9 +154,17 @@ func (s *SQLiteTracker) RecordFull(ctx context.Context, fileID string, state dom
 }
 
 func (s *SQLiteTracker) FileStates(ctx context.Context, sessionID string) ([]port.FileEntry, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT file_id, session_id, state, file_name, file_size, error_msg
-		 FROM file_states WHERE session_id = ?`, sessionID)
+	var rows *sql.Rows
+	var err error
+	if sessionID == "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT file_id, session_id, state, file_name, file_size, error_msg
+			 FROM file_states`)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT file_id, session_id, state, file_name, file_size, error_msg
+			 FROM file_states WHERE session_id = ?`, sessionID)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("querying file states: %w", err)
 	}

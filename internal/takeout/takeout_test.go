@@ -307,6 +307,19 @@ func TestNonMediaEntriesSkipped(t *testing.T) {
 	}
 }
 
+func drainNext(r port.TakeoutReader) {
+	ctx := context.Background()
+	for {
+		_, rc, err := r.Next(ctx)
+		if errors.Is(err, io.EOF) {
+			return
+		}
+		if err == nil && rc != nil {
+			rc.Close()
+		}
+	}
+}
+
 func TestAlbumManifestEmptyForNoAlbums(t *testing.T) {
 	tarData := makeTar(map[string][]byte{
 		"Takeout/IMG_0001.JPG": []byte("fake-jpeg-data"),
@@ -315,6 +328,7 @@ func TestAlbumManifestEmptyForNoAlbums(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -352,6 +366,7 @@ func TestAlbumManifestTopLevelAlbumJSON(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -393,6 +408,7 @@ func TestAlbumManifestPerAlbumJSON(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -440,6 +456,7 @@ func TestAlbumManifestPhotoInMultipleAlbums(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -497,6 +514,7 @@ func TestAlbumManifestEmptyAlbum(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -534,6 +552,7 @@ func TestAlbumManifestSpecialCharacters(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -567,6 +586,7 @@ func TestAlbumManifestFromSidecarAlbumData(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -606,6 +626,7 @@ func TestAlbumManifestMergesFormats(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {
@@ -641,6 +662,7 @@ func TestAlbumManifestCreatedAtParsed(t *testing.T) {
 	dir := t.TempDir()
 	tarPath := writeFile(t, dir, "test.tar", tarData)
 	r := NewStreamReader(tarPath)
+	drainNext(r)
 
 	albums, err := r.AlbumManifest(context.Background())
 	if err != nil {

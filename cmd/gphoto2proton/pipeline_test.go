@@ -689,6 +689,12 @@ func (f *fakeStateTracker) RecordAlbum(ctx context.Context, albumID string, stat
 	f.records = append(f.records, fakeStateRecord{fileID: albumID, state: state})
 	return nil
 }
+func (f *fakeStateTracker) RecordAlbumMembership(ctx context.Context, albumName, fileName string) error {
+	return nil
+}
+func (f *fakeStateTracker) AccumulatedAlbums(ctx context.Context) ([]domain.Album, error) {
+	return nil, nil
+}
 func (f *fakeStateTracker) FileStates(ctx context.Context, sessionID string) ([]port.FileEntry, error) {
 	return nil, nil
 }

@@ -20,19 +20,10 @@ import (
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
 
-type mediaEntry struct {
-	Name        string
-	MediaPath   string
-	SidecarPath string
-	Data        []byte
-}
-
 type Reader struct {
 	readers []*tar.Reader
 	files   []io.Closer
 	current int
-	entries []mediaEntry
-	cursor  int
 	mu      sync.Mutex
 	initErr error
 
@@ -60,7 +51,6 @@ func NewStreamReader(paths ...string) port.TakeoutReader {
 			return r
 		}
 	}
-	r.initErr = r.scanAll()
 	return r
 }
 
@@ -109,79 +99,95 @@ func isGzip(path string) bool {
 	return strings.HasSuffix(path, ".tgz") || strings.HasSuffix(path, ".tar.gz")
 }
 
-func (r *Reader) scanAll() error {
+func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.initErr != nil {
+		return nil, nil, r.initErr
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	default:
+	}
+
 	for r.current < len(r.readers) {
-		for {
-			hd, err := r.readers[r.current].Next()
-			if errors.Is(err, io.EOF) {
-				r.current++
-				break
+		hd, err := r.readers[r.current].Next()
+		if errors.Is(err, io.EOF) {
+			r.current++
+			if r.current >= len(r.readers) {
+				r.closeFiles()
 			}
+			continue
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("reading tar part %d: %w", r.current+1, err)
+		}
+		if hd.Typeflag != tar.TypeReg {
+			continue
+		}
+		name := filepath.Base(hd.Name)
+
+		if isMediaFile(name) {
+			var buf bytes.Buffer
+			if _, err := io.Copy(&buf, r.readers[r.current]); err != nil {
+				return nil, nil, fmt.Errorf("reading %s: %w", hd.Name, err)
+			}
+			media := &domain.Media{
+				Filename: name,
+			}
+			return media, io.NopCloser(&buf), nil
+		}
+
+		if IsTopLevelAlbumFile(hd.Name) {
+			data, err := io.ReadAll(r.readers[r.current])
 			if err != nil {
-				return fmt.Errorf("reading tar part %d: %w", r.current+1, err)
+				return nil, nil, fmt.Errorf("reading %s: %w", hd.Name, err)
 			}
-			if hd.Typeflag != tar.TypeReg {
-				continue
+			albums, err := ParseTopLevelAlbum(bytes.NewReader(data))
+			if err != nil {
+				return nil, nil, fmt.Errorf("parsing top-level album %s: %w", hd.Name, err)
 			}
-			name := filepath.Base(hd.Name)
-			if isMediaFile(name) {
-				var buf bytes.Buffer
-				if _, err := io.Copy(&buf, r.readers[r.current]); err != nil {
-					return fmt.Errorf("reading %s: %w", hd.Name, err)
-				}
-				sidecarPath := hd.Name + ".json"
-				r.entries = append(r.entries, mediaEntry{
-					Name:        name,
-					MediaPath:   hd.Name,
-					SidecarPath: sidecarPath,
-					Data:        buf.Bytes(),
-				})
-				continue
+			r.mergeAlbums(albums)
+			continue
+		}
+		if IsPerAlbumFile(hd.Name) {
+			data, err := io.ReadAll(r.readers[r.current])
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading %s: %w", hd.Name, err)
 			}
-			if IsTopLevelAlbumFile(hd.Name) {
-				data, err := io.ReadAll(r.readers[r.current])
-				if err != nil {
-					return fmt.Errorf("reading %s: %w", hd.Name, err)
-				}
-				albums, err := ParseTopLevelAlbum(bytes.NewReader(data))
-				if err != nil {
-					return fmt.Errorf("parsing top-level album %s: %w", hd.Name, err)
-				}
-				r.mergeAlbums(albums)
-				continue
+			album, err := ParsePerAlbumJSON(bytes.NewReader(data))
+			if err != nil {
+				return nil, nil, fmt.Errorf("parsing per-album JSON %s: %w", hd.Name, err)
 			}
-			if IsPerAlbumFile(hd.Name) {
-				data, err := io.ReadAll(r.readers[r.current])
-				if err != nil {
-					return fmt.Errorf("reading %s: %w", hd.Name, err)
-				}
-				album, err := ParsePerAlbumJSON(bytes.NewReader(data))
-				if err != nil {
-					return fmt.Errorf("parsing per-album JSON %s: %w", hd.Name, err)
-				}
-				r.mergeAlbums([]domain.Album{album})
-				continue
+			r.mergeAlbums([]domain.Album{album})
+			continue
+		}
+		if IsPhotoSidecar(hd.Name) {
+			data, err := io.ReadAll(r.readers[r.current])
+			if err != nil {
+				return nil, nil, fmt.Errorf("reading sidecar %s: %w", hd.Name, err)
 			}
-			if IsPhotoSidecar(hd.Name) {
-				data, err := io.ReadAll(r.readers[r.current])
-				if err != nil {
-					return fmt.Errorf("reading sidecar %s: %w", hd.Name, err)
-				}
-				albums, err := ParseSidecarAlbums(bytes.NewReader(data))
-				if err != nil {
-					return fmt.Errorf("parsing sidecar albums %s: %w", hd.Name, err)
-				}
-				r.mergeAlbums(albums)
-				continue
+			albums, err := ParseSidecarAlbums(bytes.NewReader(data))
+			if err != nil {
+				return nil, nil, fmt.Errorf("parsing sidecar albums %s: %w", hd.Name, err)
 			}
+			r.mergeAlbums(albums)
+			continue
 		}
 	}
-	r.current = 0
+
+	r.closeFiles()
+	return nil, nil, io.EOF
+}
+
+func (r *Reader) closeFiles() {
 	for _, c := range r.files {
 		c.Close()
 	}
 	r.files = nil
-	return nil
 }
 
 func (r *Reader) mergeAlbums(albums []domain.Album) {
@@ -214,34 +220,6 @@ func (r *Reader) mergeAlbums(albums []domain.Album) {
 		}
 		r.albumIndex[key] = acc
 	}
-}
-
-func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if r.initErr != nil {
-		return nil, nil, r.initErr
-	}
-
-	select {
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	default:
-	}
-
-	if r.cursor >= len(r.entries) {
-		return nil, nil, io.EOF
-	}
-
-	entry := r.entries[r.cursor]
-	r.cursor++
-
-	media := &domain.Media{
-		Filename: entry.Name,
-	}
-
-	return media, io.NopCloser(bytes.NewReader(entry.Data)), nil
 }
 
 func (r *Reader) AlbumManifest(ctx context.Context) ([]domain.Album, error) {
