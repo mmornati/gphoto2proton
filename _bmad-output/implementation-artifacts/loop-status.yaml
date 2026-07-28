@@ -1,6 +1,6 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
-total_stories: 6
+total_stories: 8
 current_index: 6
 stories:
   - key: "1-1"
@@ -106,3 +106,19 @@ stories:
       - "_bmad-output/implementation-artifacts/1-6-photos-api-probe.md"
       - "_bmad-output/planning-artifacts/epics.md"
       - "_bmad-output/planning-artifacts/research/photos-api-probe-2026-07-27.md"
+  - key: "2-1"
+    status: pr-in-progress
+    commit: "8e355ccf9296fceacbb7d30cb775ad2985f96ef4"
+    files_changed:
+      - "internal/domain/album.go"
+      - "internal/domain/pipeline.go"
+      - "internal/takeout/metadata.go"
+      - "internal/takeout/metadata_test.go"
+      - "internal/takeout/stream.go"
+      - "internal/takeout/takeout_test.go"
+      - "cmd/gphoto2proton/pipeline.go"
+      - "cmd/gphoto2proton/pipeline_test.go"
+      - "_bmad-output/implementation-artifacts/2-1-album-manifest-extraction.md"
+      - "_bmad-output/implementation-artifacts/loop-status.yaml"
+  - key: "2-2"
+    status: pending

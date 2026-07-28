@@ -19,7 +19,16 @@
 // SOFTWARE.
 package domain
 
+import (
+	"context"
+	"time"
+)
+
 type Album struct {
-	ID    string
-	Title string
+	ID        string
+	Name      string
+	FileIDs   []string
+	CreatedAt time.Time
 }
+
+type AlbumHandler func(ctx context.Context, albums []Album) error
