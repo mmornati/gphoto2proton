@@ -1,6 +1,10 @@
+---
+baseline_commit: "7bf308d"
+---
+
 # Story 1.3: EXIF Restoration via exiftool
 
-Status: ready-for-dev
+Status: review
 
 ## Story
 
@@ -19,12 +23,12 @@ so that my Proton Photos library has correct timestamps and locations.
 
 ## Tasks / Subtasks
 
-- [ ] Implement internal/exif/processor.go
-  - [ ] Check exiftool availability on init (os/exec.LookPath)
-  - [ ] Construct exiftool command with -tagsFromFile (copy JSON-derived tags)
-  - [ ] Pipe media stream through exiftool subprocess
-  - [ ] Handle stdout/stderr from exiftool for success/failure detection
-  - [ ] Implement best-effort fallback: log WARN on failure, return unmodified stream
+- [x] Implement internal/exif/processor.go
+  - [x] Check exiftool availability on init (os/exec.LookPath)
+  - [x] Construct exiftool command with -tagsFromFile (copy JSON-derived tags)
+  - [x] Pipe media stream through exiftool subprocess
+  - [x] Handle stdout/stderr from exiftool for success/failure detection
+  - [x] Implement best-effort fallback: log WARN on failure, return unmodified stream
 
 ## Dev Notes
 

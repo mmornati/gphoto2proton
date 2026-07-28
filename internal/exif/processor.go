@@ -1,39 +1,123 @@
-// Copyright (c) 2026 mmornati
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
 package exif
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/mmornati/gphoto2proton/internal/domain"
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
 
-type Processor struct{}
+type Processor struct {
+	exifPath string
+	available bool
+}
 
 func NewProcessor() port.ExifProcessor {
-	return &Processor{}
+	path, err := exec.LookPath("exiftool")
+	if err != nil {
+		slog.Warn("exiftool not found, EXIF processing disabled",
+			"error", err,
+		)
+		return &Processor{available: false}
+	}
+	slog.Debug("exiftool found", "path", path)
+	return &Processor{exifPath: path, available: true}
 }
 
 func (p *Processor) Process(ctx context.Context, r io.Reader, meta *domain.MediaMeta) (io.ReadCloser, error) {
-	return nil, errors.New("not implemented")
+	input, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("reading input: %w", err)
+	}
+
+	if !p.available {
+		return io.NopCloser(bytes.NewReader(input)), fmt.Errorf("exiftool not installed")
+	}
+
+	if meta == nil {
+		return io.NopCloser(bytes.NewReader(input)), nil
+	}
+
+	args := p.buildArgs(meta)
+	if len(args) == 0 {
+		return io.NopCloser(bytes.NewReader(input)), nil
+	}
+
+	output, err := p.runExiftool(ctx, input, args)
+	if err != nil {
+		slog.Warn("exif: processing failed, returning unmodified stream",
+			"error", err,
+		)
+		return io.NopCloser(bytes.NewReader(input)), nil
+	}
+
+	return io.NopCloser(bytes.NewReader(output)), nil
+}
+
+func (p *Processor) runExiftool(ctx context.Context, input []byte, args []string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, p.exifPath, args...)
+	cmd.Stdin = bytes.NewReader(input)
+
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	if err := cmd.Run(); err != nil {
+		stderrStr := strings.TrimSpace(stderr.String())
+		if stderrStr != "" {
+			slog.Debug("exif: exiftool stderr", "output", stderrStr)
+		}
+		return nil, fmt.Errorf("exiftool: %w: %s", err, stderrStr)
+	}
+
+	return stdout.Bytes(), nil
+}
+
+func (p *Processor) buildArgs(meta *domain.MediaMeta) []string {
+	args := []string{"-overwrite_original", "-q", "-"}
+
+	if meta.DateTimeOriginal != "" {
+		ts := epochToExif(meta.DateTimeOriginal)
+		if ts != "" {
+			args = append(args, "-DateTimeOriginal="+ts)
+			args = append(args, "-CreateDate="+ts)
+		}
+	}
+
+	if meta.Latitude != 0 || meta.Longitude != 0 {
+		args = append(args, fmt.Sprintf("-GPSLatitude=%f", meta.Latitude))
+		args = append(args, fmt.Sprintf("-GPSLongitude=%f", meta.Longitude))
+	}
+
+	if meta.Altitude != 0 {
+		args = append(args, fmt.Sprintf("-GPSAltitude=%f", meta.Altitude))
+	}
+
+	if meta.Description != "" {
+		args = append(args, "-ImageDescription="+meta.Description)
+	}
+
+	if len(args) == 3 {
+		return nil
+	}
+
+	return args
+}
+
+func epochToExif(epoch string) string {
+	ts, err := strconv.ParseInt(epoch, 10, 64)
+	if err != nil {
+		return ""
+	}
+	t := time.Unix(ts, 0).UTC()
+	return t.Format("2006:01:02 15:04:05")
 }
