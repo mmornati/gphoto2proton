@@ -107,7 +107,7 @@ stories:
       - "_bmad-output/planning-artifacts/epics.md"
       - "_bmad-output/planning-artifacts/research/photos-api-probe-2026-07-27.md"
   - key: "2-1"
-    status: review-in-progress
+    status: pr-in-progress
     commit: "8e355ccf9296fceacbb7d30cb775ad2985f96ef4"
     files_changed:
       - "internal/domain/album.go"
