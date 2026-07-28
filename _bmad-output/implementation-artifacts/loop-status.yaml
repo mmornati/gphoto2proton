@@ -1,7 +1,7 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
 total_stories: 6
-current_index: 4
+current_index: 6
 stories:
   - key: "1-1"
     status: merged
@@ -76,6 +76,33 @@ stories:
       - "go.mod"
       - "go.sum"
   - key: "1-5"
-    status: pending
+    status: merged
+    commit: "4196c9e"
+    pr_number: 5
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/5"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
+    files_changed:
+      - "internal/domain/migration.go"
+      - "internal/port/state.go"
+      - "internal/state/sqlite.go"
+      - "internal/state/migrations.go"
+      - "internal/state/state_test.go"
+      - "_bmad-output/implementation-artifacts/1-5-state-tracker-resume.md"
+      - "_bmad-output/implementation-artifacts/loop-status.yaml"
+      - "go.mod"
+      - "go.sum"
   - key: "1-6"
-    status: pending
+    status: merged
+    commit: "4078314"
+    pr_number: 6
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/6"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
+    files_changed:
+      - "cmd/probe/main.go"
+      - "_bmad-output/implementation-artifacts/1-6-photos-api-probe.md"
+      - "_bmad-output/planning-artifacts/epics.md"
+      - "_bmad-output/planning-artifacts/research/photos-api-probe-2026-07-27.md"
