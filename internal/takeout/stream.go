@@ -41,8 +41,7 @@ type Reader struct {
 }
 
 type albumAccumulator struct {
-	Title      string
-	Date       string
+	Name       string
 	CreatedAt  time.Time
 	HasCreated bool
 	FileIDs    []string
@@ -160,9 +159,7 @@ func (r *Reader) scanAll() error {
 				if err != nil {
 					return fmt.Errorf("parsing per-album JSON %s: %w", hd.Name, err)
 				}
-				if album.Name != "" {
-					r.mergeAlbums([]domain.Album{album})
-				}
+				r.mergeAlbums([]domain.Album{album})
 				continue
 			}
 			if IsPhotoSidecar(hd.Name) {
@@ -199,8 +196,8 @@ func (r *Reader) mergeAlbums(albums []domain.Album) {
 		acc, exists := r.albumIndex[key]
 		if !exists {
 			acc = albumAccumulator{
-				Title: a.Name,
-				seen:  make(map[string]bool),
+				Name: a.Name,
+				seen: make(map[string]bool),
 			}
 			r.albumIndexOrder = append(r.albumIndexOrder, key)
 		}
@@ -266,7 +263,7 @@ func (r *Reader) AlbumManifest(ctx context.Context) ([]domain.Album, error) {
 			continue
 		}
 		album := domain.Album{
-			Name:    acc.Title,
+			Name:    acc.Name,
 			FileIDs: append([]string(nil), acc.FileIDs...),
 		}
 		if acc.HasCreated {

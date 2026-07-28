@@ -125,3 +125,44 @@ None — implementation landed cleanly without rework.
 ## Change Log
 
 - 2026-07-28 — Story 2-1 implementation complete. Album manifest extraction landed with parsers for top-level, per-album, and embedded sidecar formats; reader now exposes `AlbumManifest` returning a merged `[]domain.Album`; composition-root pipeline calls the manifest after the upload loop and forwards it to a pluggable album handler. All tests pass (`go test ./... -count=5`).
+- 2026-07-28 — Review-driven fixes: dropped the unused `Album.Title` field (parsers only ever populate `Name`, which is what story 2-2's `ProtonUploader.CreateAlbum(name, fileIDs)` consumes); deleted the hollow `internal/domain/pipeline.go` (moved `AlbumHandler` to `internal/domain/album.go`); removed unused `Pipeline.Exif` / `Pipeline.State` fields; added nil-guards in `Pipeline.processMedia` for `media` and `rc`; replaced `fmt.Sscanf` in `parseUnixTimestamp` with `strconv.ParseInt`; removed dead `albumAccumulator.Date` field; centralized empty-album-name dropping in `Reader.mergeAlbums` so all three parsers share one rule. `go test ./... -race` passes (84 tests), `go vet ./...` clean. Note: pre-existing `gofmt -l` drift remains in `internal/domain/migration.go`, `internal/exif/processor.go`, and `internal/proton/upload.go` — out of scope for this fix.
+
+## Review Findings (2026-07-28)
+
+Triaged categories: `intent_gap`, `bad_spec`, `patch`, `defer`, `reject`. All four acceptance criteria are satisfied by the test suite; findings below are quality, architecture, and robustness issues.
+
+### intent_gap
+
+- [ ] [Review][intent_gap] Album.Name vs Album.Title semantic ambiguity — `internal/domain/album.go:27-28` The story only mentions `Name`, `FileIDs`, `CreatedAt` as the new fields but the existing `Title` field is still present and never assigned by any new code. There is no doc comment explaining when a future caller should set `Title` vs `Name`. The dev notes say "Title is preserved for story 2-2's CreateAlbum path" but the new parsers only ever populate `Name` — so `Title` will always be empty in any Album returned from `TakeoutReader`. This will silently break Proton `CreateAlbum` calls in story 2-2 unless resolved (either drop `Title`, repoint parsers to `Title`, or add doc comments).
+- [ ] [Review][intent_gap] Pipeline lives in composition root instead of domain — `cmd/gphoto2proton/pipeline.go` vs `internal/domain/pipeline.go`. The architecture spine diagram (`ARCHITECTURE-SPINE.md` line 34-49) explicitly shows "Pipeline" inside the domain hexagon. Story note justifies composition-root placement because of an import cycle, but the actual `domain.Pipeline` struct was kept (now hollow and unused) and the new `cmd.Pipeline` type is the real implementation. Net effect: hexagonal layout is broken, and the domain `Pipeline` is dead code that will mislead future readers.
+
+### bad_spec
+
+- [ ] [Review][bad_spec] Story Dev Notes state `Name` is "original filenames from Takeout" — that's actually what `FileIDs` is. The `Name` field stores the album title parsed from the JSON `title` field. A reader of the story spec will misread the field's purpose. Add a clarifying sentence to the Dev Notes before story 2-2.
+- [ ] [Review][bad_spec] Spec does not specify what `AlbumHandler` should do with Takeout-side file IDs vs Proton-internal file IDs. The current `cmd.Pipeline` returns `Name` + `FileIDs` (Takeout filenames) to the handler, but `ProtonUploader.CreateAlbum` is expected to receive Proton-internal file IDs per AD-10. Story 2-1 implicitly defers this translation to story 2-2 but the spec should call out the boundary explicitly.
+
+### patch
+
+- [ ] [Review][Patch] `parseUnixTimestamp` uses `fmt.Sscanf(s, "%d", &ts)` — `internal/takeout/metadata.go:189`. `Sscanf` silently truncates on fractional input (`"1625097600.5"` → 1625097600) and silently accepts trailing garbage (`"1625097600ms"` → 1625097600). Replace with `strconv.ParseInt(s, 10, 64)`. [internal/takeout/metadata.go:188-194]
+- [ ] [Review][Patch] `bytesTrimSpace` reinvents stdlib — `internal/takeout/metadata.go:220-238`. Replace with `bytes.TrimSpace` from the stdlib (Go 1.21+; project targets 1.23+). [internal/takeout/metadata.go:220]
+- [ ] [Review][Patch] `albumAccumulator.Date string` declared but never assigned — `internal/takeout/stream.go:46`. Dead field; remove it. [internal/takeout/stream.go:46]
+- [ ] [Review][Patch] `Pipeline.Exif` and `Pipeline.State` declared but never used in `Run` — `cmd/gphoto2proton/pipeline.go:40-41`. Either remove the fields or wire them into the pipeline. As-is the struct claims responsibilities it doesn't fulfill (architecture spine AD-10/sequence diagram calls for both Exif and State calls inside the loop). [cmd/gphoto2proton/pipeline.go:38-44]
+- [ ] [Review][Patch] `domain.Pipeline` is a hollow struct — `internal/domain/pipeline.go:26-32`. Only `OnAlbums` field exists, and `NewPipeline()` returns an empty instance. Nothing in the codebase uses it. Remove the file (or replace with a real domain-side pipeline constructor that does not create the import cycle). [internal/domain/pipeline.go]
+- [ ] [Review][Patch] `Pipeline.processMedia` does not guard against `media == nil` or `rc == nil` — `cmd/gphoto2proton/pipeline.go:78-87`. The TakeoutReader port contract does not enforce non-nil `media`/`rc` on success; a misbehaving adapter would panic. Add a nil check before `media.Filename` and before `rc.Close()`. [cmd/gphoto2proton/pipeline.go:78]
+- [ ] [Review][Patch] Parser/aggregator split on empty album name is inconsistent — `internal/takeout/metadata.go:90-141` return albums with `Name == ""`; `internal/takeout/stream.go:196` silently drops them. Centralize: either the parsers must reject, or `AlbumManifest` should reject, but not both with different rules. [internal/takeout/metadata.go:90-141, internal/takeout/stream.go:194-219]
+- [ ] [Review][Patch] Add test asserting `AlbumManifest` is NOT called when upload fails — `cmd/gphoto2proton/pipeline_test.go`. Current `TestPipelinePropagatesUploadError` only checks the error return; adding `r.manifestCalls == 0` would lock in the post-upload ordering invariant. [cmd/gphoto2proton/pipeline_test.go:236-254]
+- [ ] [Review][Patch] Add test asserting `AlbumManifest` is NOT called when reader `Next` errors mid-stream — `cmd/gphoto2proton/pipeline_test.go`. `TestPipelineReturnsReaderError` only checks the error. [cmd/gphoto2proton/pipeline_test.go:256-264]
+
+### defer
+
+- [x] [Review][Defer] `Pipeline.processMedia` discards the fileID returned by `Upload` — `cmd/gphoto2proton/pipeline.go:82`. Out of scope for story 2-1 (state recording is story 1-5). Deferred to story 2-2 / a future "state wiring" story. Pre-existing concern. [cmd/gphoto2proton/pipeline.go:82]
+- [x] [Review][Defer] Tar path traversal (`Takeout/../etc/passwd`) not sanitized — `internal/takeout/stream.go:113`. Defense-in-depth concern; real risk depends on how the archive is sourced. Pre-existing pattern in this codebase. [internal/takeout/stream.go:113]
+- [x] [Review][Defer] Album ordering in `AlbumManifest` is order-of-discovery across archive parts — `internal/takeout/stream.go:262-276`. Multi-part archives could yield different orders; downstream Proton calls likely don't care, but if determinism is needed later, sort by `Name` before returning. Pre-existing concern about deterministic output. [internal/takeout/stream.go:262]
+- [x] [Review][Defer] `io.ReadAll` on `album.json` files can be large — `internal/takeout/stream.go:143,156,170`. Memory concern for very large album manifests. Could be replaced with bounded `io.LimitReader`. Pre-existing pattern; no current evidence of large album.json files in real Takeouts. [internal/takeout/stream.go:143]
+
+### reject
+
+- [x] [Review][Reject] `rc.Close()` errors silently dropped — `cmd/gphoto2proton/pipeline.go:79`. Standard Go pattern; `Close()` errors are widely accepted as best-effort. Not actionable.
+- [x] [Review][Reject] `fakeUploader.CreateAlbum` stub not exercised by story 2-1 — `cmd/gphoto2proton/pipeline_test.go:188`. Required for interface compliance only. Story 2-2 will exercise it.
+- [x] [Review][Reject] `IsTopLevelAlbumFile` returns true for any path whose directory does not contain a segment named "Albums" (case-insensitive). Could yield false positives for `MyAlbums/album.json` etc., but no evidence of Takeout exports with such directory names. Dismissed as theoretical.
+- [x] [Review][Reject] `mediaExtensions` does not include `.heif` — `internal/takeout/metadata.go:14`. Out of scope for story 2-1 (album metadata is orthogonal to media extension coverage). Existing extension list unchanged from prior story.

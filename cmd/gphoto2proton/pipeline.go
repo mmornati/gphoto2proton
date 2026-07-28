@@ -32,8 +32,6 @@ import (
 type Pipeline struct {
 	Reader   port.TakeoutReader
 	Uploader port.ProtonUploader
-	Exif     port.ExifProcessor
-	State    port.StateTracker
 	OnAlbums domain.AlbumHandler
 }
 
@@ -70,6 +68,12 @@ func (p *Pipeline) Run(ctx context.Context) error {
 }
 
 func (p *Pipeline) processMedia(ctx context.Context, media *domain.Media, rc io.ReadCloser) error {
+	if media == nil {
+		return errors.New("pipeline: reader returned nil media")
+	}
+	if rc == nil {
+		return fmt.Errorf("pipeline: reader returned nil stream for %s", media.Filename)
+	}
 	defer rc.Close()
 
 	if p.Uploader != nil {

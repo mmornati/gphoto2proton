@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -186,9 +187,9 @@ func buildAlbumFromPayload(p albumDataPayload) domain.Album {
 }
 
 func parseUnixTimestamp(s string) (time.Time, error) {
-	var ts int64
-	if _, err := fmt.Sscanf(s, "%d", &ts); err != nil {
-		return time.Time{}, err
+	ts, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parsing unix timestamp %q: %w", s, err)
 	}
 	return time.Unix(ts, 0).UTC(), nil
 }
