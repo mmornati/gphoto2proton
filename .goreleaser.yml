@@ -1,0 +1,28 @@
+version: 2
+before:
+  hooks:
+    - go mod download
+builds:
+  - id: gphoto2proton
+    main: ./cmd/gphoto2proton
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/mmornati/gphoto2proton/cmd/gphoto2proton.Version={{.Version}}
+archives:
+  - id: default
+    formats: ["tar.gz"]
+    files: []
+checksum:
+  name_template: "checksums.txt"
+release:
+  github:
+    owner: mmornati
+    name: gphoto2proton

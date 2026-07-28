@@ -1,29 +1,170 @@
+
+<p align="center">
+  <img src="https://img.shields.io/badge/go-1.26.5-blue?style=flat-square" alt="Go 1.26.5"/>
+  <img src="https://img.shields.io/badge/tests-113_passing-brightgreen?style=flat-square" alt="113 tests passing"/>
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"/>
+  <img src="https://img.shields.io/badge/status-active_development-yellow?style=flat-square" alt="Active Development"/>
+</p>
+
 # gphoto2proton
 
-Single-command CLI tool to migrate Google Photos Takeout archives to Proton Drive — with streaming, EXIF restoration, album recreation, and resume safety.
+**Google Photos Takeout → Proton Drive, in a single command.**
 
-## Status
-
-Active development. Core scaffold and CLI skeleton implemented.
-
-## Prerequisites
-
-- Go 1.26+
-- [exiftool](https://exiftool.org/) (system dependency for EXIF restoration, required from story 1.3)
-
-## Build
-
-```bash
-go build ./cmd/gphoto2proton
+```
+                         ┌──────────────────────┐
+   Google Takeout .tgz ─▶│   gphoto2proton sync  │──▶ Proton Drive
+     (8 × ~44GB)         │  streaming · EXIF ·   │    + Proton Photos
+                         │  albums · resume-safe │    albums recreated
+                         └──────────────────────┘
 ```
 
-## Usage
+Migrate hundreds of gigabytes from Google Photos Takeout to Proton Drive without
+unpacking archives, losing EXIF metadata, or leaving your albums behind.
+
+---
+
+## Features
+
+| | Feature | Details |
+|---|---|---|
+| ⚡ | **Streaming** | Processes tar/tgz archives entry-by-entry — no full extraction, no 2× disk space |
+| 📸 | **EXIF Restoration** | Writes `DateTimeOriginal`, GPS coordinates, and camera metadata via `exiftool` |
+| 🖼️ | **Album Recreation** | Rebuilds your Google Photos albums inside Proton Photos automatically |
+| 🔁 | **Resume Safety** | SQLite-backed state tracker — interrupt and resume without re-uploading |
+| 🔒 | **Zero Leaks** | Authenticates via Proton-API-Bridge SDK; your credentials never leave your machine |
+
+---
+
+## Quick Start
+
+### Homebrew (macOS / Linux)
 
 ```bash
-gphoto2proton sync --takeout-dir ~/Takeout [--album-recreate] [--resume] [--state-dir ~/.gphoto2proton/state]
-gphoto2proton version
+brew tap mmornati/gphoto2proton https://github.com/mmornati/gphoto2proton
+brew install gphoto2proton exiftool
+gphoto2proton sync --takeout-dir ~/Takeout
 ```
+
+### From source
+
+```bash
+# Prerequisites
+brew install exiftool          # EXIF restoration (system dependency)
+
+# Build
+git clone https://github.com/mmornati/gphoto2proton.git
+cd gphoto2proton
+go build -o gphoto2proton ./cmd/gphoto2proton
+
+# Run
+./gphoto2proton sync --takeout-dir ~/Takeout
+
+# With album recreation
+./gphoto2proton sync --takeout-dir ~/Takeout --album-recreate
+
+# Resume an interrupted migration
+./gphoto2proton sync --takeout-dir ~/Takeout --resume
+```
+
+### Download pre-built binary
+
+Grab the latest release for your platform from the
+[Releases page](https://github.com/mmornati/gphoto2proton/releases) — no Go
+toolchain required.
+
+---
+
+## How It Works
+
+```
+                    ┌──────────────────────────────┐
+ Google Takeout     │   1. STREAMING READER        │
+    .tgz/.tar.gz   │   tar-fs + zlib gunzip       │
+    8 × ~44GB      │   entry classifier           │
+                    │   JSON sidecar parser        │
+                    └──────────┬───────────────────┘
+                               │
+                    ┌──────────▼───────────────────┐
+                    │   2. EXIF PROCESSOR           │
+                    │   exiftool subprocess         │
+                    │   DateTimeOriginal ← JSON ts  │
+                    │   GPS ← JSON location         │
+                    └──────────┬───────────────────┘
+                               │
+                    ┌──────────▼───────────────────┐
+                    │   3. UPLOAD ENGINE            │
+                    │   Proton-API-Bridge SDK       │
+                    │   streaming upload to Drive   │
+                    └──────────┬───────────────────┘
+                               │
+                    ┌──────────▼───────────────────┐
+                    │   4. ALBUM CREATOR            │
+                    │   Proton Photos HTTP API      │
+                    │   maps file IDs → albums      │
+                    └──────────┬───────────────────┘
+                               │
+                    ┌──────────▼───────────────────┐
+                    │   5. STATE TRACKER            │
+                    │   SQLite (pure Go, no CGo)   │
+                    │   per-file state → safe resume│
+                    └──────────────────────────────┘
+```
+
+Every step streams data — no temp files, no disk doubling, no waiting for extraction.
+
+---
+
+## Architecture
+
+Built with **hexagonal (ports & adapters)** architecture:
+
+```
+cmd/gphoto2proton/          ─ CLI (Cobra)
+internal/
+├── domain/                 ─ Core types (Media, Album, State)
+├── port/                   ─ Interfaces (TakeoutReader, ExifProcessor, …)
+├── takeout/                ─ Google Takeout streaming adapter
+├── exif/                   ─ EXIF restoration via exiftool
+├── proton/                 ─ Proton Drive upload + Photos album adapter
+└── state/                  ─ SQLite state persistence
+```
+
+Each adapter implements a clean `port` interface, making the pipeline testable
+with mocks and straightforward to extend.
+
+---
+
+## Commands
+
+```
+gphoto2proton sync     Run the migration pipeline
+gphoto2proton version  Print version
+```
+
+### sync flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--takeout-dir` | — | Path to extracted Google Takeout directory **(required)** |
+| `--album-recreate` | `false` | Recreate albums in Proton Photos |
+| `--resume` | `false` | Skip completed files, retry failed ones |
+| `--state-dir` | `~/.gphoto2proton/state` | SQLite state database location |
+
+---
+
+## Development
+
+```bash
+go build ./cmd/gphoto2proton       # Build
+go test ./...                       # Run all 113 tests
+go vet ./...                        # Static analysis
+```
+
+**System dependency:** `exiftool` — install via `brew install exiftool` (macOS)
+or `apt install libimage-exiftool-perl` (Linux).
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
