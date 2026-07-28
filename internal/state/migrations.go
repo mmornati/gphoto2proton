@@ -1,36 +1,48 @@
-// Copyright (c) 2026 mmornati
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-// SOFTWARE.
 package state
 
-import "errors"
+import (
+	"database/sql"
 
-type Migrator struct{}
+	_ "modernc.org/sqlite"
+)
 
-func NewMigrator() *Migrator {
-	return &Migrator{}
+type Migrator struct {
+	db     *sql.DB
+	dbPath string
+}
+
+func NewMigrator(dbPath string) *Migrator {
+	return &Migrator{dbPath: dbPath}
 }
 
 func (m *Migrator) Up() error {
-	return errors.New("not implemented")
+	db, err := sql.Open("sqlite", m.dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS file_states (
+			file_id    TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			state      INTEGER NOT NULL,
+			file_name  TEXT NOT NULL DEFAULT '',
+			file_size  INTEGER NOT NULL DEFAULT 0,
+			error_msg  TEXT NOT NULL DEFAULT '',
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`)
+	return err
 }
 
 func (m *Migrator) Down() error {
-	return errors.New("not implemented")
+	db, err := sql.Open("sqlite", m.dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`DROP TABLE IF EXISTS file_states`)
+	return err
 }

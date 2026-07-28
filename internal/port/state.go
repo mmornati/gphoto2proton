@@ -25,7 +25,18 @@ import (
 	"github.com/mmornati/gphoto2proton/internal/domain"
 )
 
+type FileEntry struct {
+	FileID    string
+	SessionID string
+	State     domain.State
+	FileName  string
+	FileSize  int64
+	ErrorMsg  string
+}
+
 type StateTracker interface {
 	Init(ctx context.Context, sessionID string) error
 	Record(ctx context.Context, fileID string, state domain.State) error
+	FileStates(ctx context.Context, sessionID string) ([]FileEntry, error)
+	Close() error
 }
