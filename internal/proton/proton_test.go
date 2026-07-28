@@ -61,7 +61,7 @@ func TestCredentialStoreClear(t *testing.T) {
 	dir := t.TempDir()
 	store := NewCredentialStore(dir)
 
-	store.Save(CredentialData{UID: "test"})
+	_ = store.Save(CredentialData{UID: "test"})
 
 	if err := store.Clear(); err != nil {
 		t.Fatalf("Clear failed: %v", err)

@@ -3,11 +3,10 @@ package state
 import (
 	"database/sql"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // sqlite driver
 )
 
 type Migrator struct {
-	db     *sql.DB
 	dbPath string
 }
 

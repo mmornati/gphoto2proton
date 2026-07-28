@@ -49,12 +49,12 @@ func TestFileStates_BySession(t *testing.T) {
 	tracker1, _ := newTracker(t, "session-1")
 	tracker2, _ := newTracker(t, "session-2")
 
-	tracker1.Init(context.Background(), "session-1")
-	tracker2.Init(context.Background(), "session-2")
+	_ = tracker1.Init(context.Background(), "session-1")
+	_ = tracker2.Init(context.Background(), "session-2")
 
-	tracker1.RecordFull(context.Background(), "f1", domain.StateUploaded, "a.jpg", 100, "")
-	tracker1.RecordFull(context.Background(), "f2", domain.StateFailed, "b.jpg", 200, "err")
-	tracker2.Record(context.Background(), "f3", domain.StatePending)
+	_ = tracker1.RecordFull(context.Background(), "f1", domain.StateUploaded, "a.jpg", 100, "")
+	_ = tracker1.RecordFull(context.Background(), "f2", domain.StateFailed, "b.jpg", 200, "err")
+	_ = tracker2.Record(context.Background(), "f3", domain.StatePending)
 
 	entries, err := tracker1.FileStates(context.Background(), "session-1")
 	if err != nil {
@@ -72,10 +72,10 @@ func TestPendingFiles_FiltersCorrectly(t *testing.T) {
 	tracker, _ := newTracker(t, "session-1")
 	defer tracker.Close()
 
-	tracker.Record(context.Background(), "f1", domain.StateUploaded)
-	tracker.Record(context.Background(), "f2", domain.StatePending)
-	tracker.Record(context.Background(), "f3", domain.StateFailed)
-	tracker.Record(context.Background(), "f4", domain.StateSkipped)
+	_ = tracker.Record(context.Background(), "f1", domain.StateUploaded)
+	_ = tracker.Record(context.Background(), "f2", domain.StatePending)
+	_ = tracker.Record(context.Background(), "f3", domain.StateFailed)
+	_ = tracker.Record(context.Background(), "f4", domain.StateSkipped)
 
 	pending, err := tracker.PendingFiles(context.Background(), "session-1")
 	if err != nil {
@@ -146,6 +146,6 @@ func newTracker(t *testing.T, sessionID string) (*SQLiteTracker, string) {
 	if err != nil {
 		t.Fatalf("NewSQLiteTracker failed: %v", err)
 	}
-	tracker.Init(context.Background(), sessionID)
+	_ = tracker.Init(context.Background(), sessionID)
 	return tracker, dbPath
 }

@@ -337,10 +337,7 @@ func (e *httpStatusError) Error() string {
 
 func shouldRetry(err error) bool {
 	var retryable *retryableError
-	if errors.As(err, &retryable) {
-		return true
-	}
-	return false
+	return errors.As(err, &retryable)
 }
 
 func nextBackoff(current, max time.Duration) time.Duration {

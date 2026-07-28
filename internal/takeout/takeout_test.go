@@ -170,23 +170,23 @@ func TestNextReturnsErrorForNonTarFile(t *testing.T) {
 func TestCorruptTarEntryReturnsError(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	tw.WriteHeader(&tar.Header{
+	_ = tw.WriteHeader(&tar.Header{
 		Name: "good.txt",
 		Size: 5,
 		Mode: 0644,
 	})
-	tw.Write([]byte("hello"))
+	_, _ = tw.Write([]byte("hello"))
 
 	hdr := &tar.Header{Name: "broken.bin", Size: 10, Mode: 0644}
-	tw.WriteHeader(hdr)
-	tw.Write([]byte("short"))
+	_ = tw.WriteHeader(hdr)
+	_, _ = tw.Write([]byte("short"))
 
-	tw.WriteHeader(&tar.Header{
+	_ = tw.WriteHeader(&tar.Header{
 		Name: "photo.jpg",
 		Size: 4,
 		Mode: 0644,
 	})
-	tw.Write([]byte("data"))
+	_, _ = tw.Write([]byte("data"))
 
 	tw.Close()
 

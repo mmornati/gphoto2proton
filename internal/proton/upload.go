@@ -66,12 +66,14 @@ func NewUploader(ctx context.Context, username, password string, credStore *Cred
 	}
 
 	if driveCred != nil {
-		credStore.Save(CredentialData{
+		if err := credStore.Save(CredentialData{
 			UID:           driveCred.UID,
 			AccessToken:   driveCred.AccessToken,
 			RefreshToken:  driveCred.RefreshToken,
 			SaltedKeyPass: driveCred.SaltedKeyPass,
-		})
+		}); err != nil {
+			return nil, fmt.Errorf("saving credentials: %w", err)
+		}
 	}
 
 	return &Uploader{
