@@ -107,11 +107,15 @@ stories:
       - "_bmad-output/planning-artifacts/epics.md"
       - "_bmad-output/planning-artifacts/research/photos-api-probe-2026-07-27.md"
   - key: "2-1"
-    status: review-in-progress
-    commit: "8e355ccf9296fceacbb7d30cb775ad2985f96ef4"
+    status: merged
+    commit: "221e69c"
+    pr_number: 7
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/7"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
     files_changed:
       - "internal/domain/album.go"
-      - "internal/domain/pipeline.go"
       - "internal/takeout/metadata.go"
       - "internal/takeout/metadata_test.go"
       - "internal/takeout/stream.go"
@@ -119,6 +123,5 @@ stories:
       - "cmd/gphoto2proton/pipeline.go"
       - "cmd/gphoto2proton/pipeline_test.go"
       - "_bmad-output/implementation-artifacts/2-1-album-manifest-extraction.md"
-      - "_bmad-output/implementation-artifacts/loop-status.yaml"
   - key: "2-2"
     status: pending
