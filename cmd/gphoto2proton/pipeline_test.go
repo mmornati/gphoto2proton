@@ -301,8 +301,8 @@ func TestPipelineIntegrationWithRealTakeoutReader(t *testing.T) {
 	}
 	for _, name := range names {
 		content := files[name]
-		tw.WriteHeader(&tar.Header{Name: name, Size: int64(len(content)), Mode: 0644})
-		tw.Write(content)
+		_ = tw.WriteHeader(&tar.Header{Name: name, Size: int64(len(content)), Mode: 0644})
+		_, _ = tw.Write(content)
 	}
 	tw.Close()
 

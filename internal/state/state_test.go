@@ -90,10 +90,10 @@ func TestDoneFiles_FiltersCorrectly(t *testing.T) {
 	tracker, _ := newTracker(t, "session-1")
 	defer tracker.Close()
 
-	tracker.Record(context.Background(), "f1", domain.StateUploaded)
-	tracker.Record(context.Background(), "f2", domain.StatePending)
-	tracker.Record(context.Background(), "f3", domain.StateSkipped)
-	tracker.Record(context.Background(), "f4", domain.StateFailed)
+	_ = tracker.Record(context.Background(), "f1", domain.StateUploaded)
+	_ = tracker.Record(context.Background(), "f2", domain.StatePending)
+	_ = tracker.Record(context.Background(), "f3", domain.StateSkipped)
+	_ = tracker.Record(context.Background(), "f4", domain.StateFailed)
 
 	done, err := tracker.DoneFiles(context.Background(), "session-1")
 	if err != nil {
@@ -108,8 +108,8 @@ func TestResetFailed(t *testing.T) {
 	tracker, _ := newTracker(t, "session-1")
 	defer tracker.Close()
 
-	tracker.Record(context.Background(), "f1", domain.StateFailed)
-	tracker.Record(context.Background(), "f2", domain.StateUploaded)
+	_ = tracker.Record(context.Background(), "f1", domain.StateFailed)
+	_ = tracker.Record(context.Background(), "f2", domain.StateUploaded)
 
 	if err := tracker.ResetFailed(context.Background(), "session-1"); err != nil {
 		t.Fatalf("ResetFailed failed: %v", err)
