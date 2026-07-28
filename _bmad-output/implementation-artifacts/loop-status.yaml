@@ -1,7 +1,7 @@
 # Loop Status
 started: "2026-07-27T19:16:50Z"
 total_stories: 8
-current_index: 7
+current_index: 8
 stories:
   - key: "1-1"
     status: merged
@@ -124,14 +124,22 @@ stories:
       - "cmd/gphoto2proton/pipeline_test.go"
       - "_bmad-output/implementation-artifacts/2-1-album-manifest-extraction.md"
   - key: "2-2"
-    status: in-progress
+    status: merged
     commit: "9af66a0ce4992faecc9177ddad1de43cac7a0065"
+    pr_number: 8
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/8"
+    ci_attempts: 0
+    ci_total_seconds: 0
+    merged_at: "2026-07-28"
     files_changed:
       - "internal/proton/album.go"
       - "internal/proton/album_test.go"
       - "internal/proton/upload.go"
       - "internal/proton/proton_test.go"
       - "internal/domain/migration.go"
+      - "internal/port/state.go"
+      - "internal/state/sqlite.go"
+      - "internal/state/migrations.go"
       - "cmd/gphoto2proton/pipeline.go"
       - "cmd/gphoto2proton/pipeline_test.go"
       - "_bmad-output/implementation-artifacts/2-2-album-recreation-proton.md"
