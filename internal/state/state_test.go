@@ -200,6 +200,19 @@ func TestAccumulatedAlbumsEmpty(t *testing.T) {
 	}
 }
 
+func TestAccumulatedAlbumsContextCancellation(t *testing.T) {
+	tracker, _ := newTracker(t, "session-1")
+	defer tracker.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := tracker.AccumulatedAlbums(ctx)
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+}
+
 func TestAccumulatedAlbumsCrossSession(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "shared.db")
 	trackerA, errA := NewSQLiteTracker(dbPath)

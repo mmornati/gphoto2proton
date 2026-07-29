@@ -640,6 +640,22 @@ func TestAlbumManifestMergesFormats(t *testing.T) {
 	}
 }
 
+func TestNewStreamReaderSinglePathNoExpand(t *testing.T) {
+	dir := t.TempDir()
+	archive1 := writeFile(t, dir, "archive.tar", makeTar(map[string][]byte{
+		"photo1.jpg": []byte("data1"),
+	}))
+	writeFile(t, dir, "archive_extra.tar", []byte("should not be opened"))
+
+	r := NewStreamReader(archive1).(*Reader)
+	if r.initErr != nil {
+		t.Fatalf("unexpected init error: %v", r.initErr)
+	}
+	if len(r.readers) != 1 {
+		t.Fatalf("expected 1 reader, got %d - single path should not expand", len(r.readers))
+	}
+}
+
 func TestAlbumManifestCreatedAtParsed(t *testing.T) {
 	albumData := map[string]interface{}{
 		"albumData": map[string]interface{}{

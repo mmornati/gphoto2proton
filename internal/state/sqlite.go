@@ -25,33 +25,10 @@ func NewSQLiteTracker(dbPath string) (*SQLiteTracker, error) {
 		db.Close()
 		return nil, fmt.Errorf("pinging sqlite: %w", err)
 	}
-	if _, err := db.Exec(`
-		CREATE TABLE IF NOT EXISTS file_states (
-			file_id    TEXT PRIMARY KEY,
-			session_id TEXT NOT NULL,
-			state      INTEGER NOT NULL,
-			file_name  TEXT NOT NULL DEFAULT '',
-			file_size  INTEGER NOT NULL DEFAULT 0,
-			error_msg  TEXT NOT NULL DEFAULT '',
-			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-		);
-		CREATE TABLE IF NOT EXISTS album_states (
-			album_id   TEXT NOT NULL,
-			session_id TEXT NOT NULL,
-			state      INTEGER NOT NULL,
-			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-			PRIMARY KEY (album_id, session_id)
-		);
-		CREATE TABLE IF NOT EXISTS album_members (
-			album_name TEXT NOT NULL,
-			file_name  TEXT NOT NULL,
-			session_id TEXT NOT NULL DEFAULT '',
-			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-			PRIMARY KEY (album_name, file_name, session_id)
-		)
-	`); err != nil {
+	m := NewMigrator(dbPath)
+	if err := m.Up(); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("creating table: %w", err)
+		return nil, fmt.Errorf("running migrations: %w", err)
 	}
 	return &SQLiteTracker{db: db}, nil
 }
@@ -102,6 +79,10 @@ func (s *SQLiteTracker) AccumulatedAlbums(ctx context.Context) ([]domain.Album, 
 	}
 	defer rows.Close()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	var entries []struct {
 		albumName string
 		fileName  string
@@ -113,6 +94,9 @@ func (s *SQLiteTracker) AccumulatedAlbums(ctx context.Context) ([]domain.Album, 
 		}
 		if err := rows.Scan(&e.albumName, &e.fileName); err != nil {
 			return nil, fmt.Errorf("scanning album member: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		entries = append(entries, e)
 	}
