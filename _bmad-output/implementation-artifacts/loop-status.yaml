@@ -1,7 +1,16 @@
 # Loop Status
 started: "2026-07-28"
+finished: "2026-07-28T20:21:01Z"
+status: done
 total_stories: 1
-current_index: 0
+current_index: 1
 stories:
   - key: "3-1-archive-aware-streaming"
-    status: dev-in-progress
+    status: merged
+    commit: 38b749e
+    pr_number: 9
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/9"
+    ci_attempts: 0
+    ci_total_seconds: 60
+    merged_at: "2026-07-28T20:21:01Z"
+    files_changed: 13

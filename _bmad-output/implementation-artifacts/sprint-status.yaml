@@ -19,4 +19,4 @@ development_status:
 
   # Process archives one by one with streaming, download management,
   # and cross-archive album persistence
-  3-1-archive-aware-streaming: review
+  3-1-archive-aware-streaming: done
