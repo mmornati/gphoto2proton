@@ -29,6 +29,7 @@ type Reader struct {
 
 	albumIndex      map[string]albumAccumulator
 	albumIndexOrder []string
+	sidecarMeta     map[string]*domain.MediaMeta
 }
 
 type albumAccumulator struct {
@@ -40,7 +41,9 @@ type albumAccumulator struct {
 }
 
 func NewStreamReader(paths ...string) port.TakeoutReader {
-	r := &Reader{}
+	r := &Reader{
+		sidecarMeta: make(map[string]*domain.MediaMeta),
+	}
 	if len(paths) == 0 {
 		return r
 	}
@@ -138,6 +141,10 @@ func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error)
 			media := &domain.Media{
 				Filename: name,
 			}
+			if meta, ok := r.sidecarMeta[name]; ok {
+				media.Metadata = meta
+				delete(r.sidecarMeta, name)
+			}
 			return media, io.NopCloser(&buf), nil
 		}
 
@@ -169,6 +176,11 @@ func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error)
 			data, err := io.ReadAll(r.readers[r.current])
 			if err != nil {
 				return nil, nil, fmt.Errorf("reading sidecar %s: %w", hd.Name, err)
+			}
+			mediaName := strings.TrimSuffix(name, ".json")
+			meta, metaErr := ParseSidecar(bytes.NewReader(data))
+			if metaErr == nil && meta != nil {
+				r.sidecarMeta[mediaName] = meta
 			}
 			albums, err := ParseSidecarAlbums(bytes.NewReader(data))
 			if err != nil {

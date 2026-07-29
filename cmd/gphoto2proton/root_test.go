@@ -20,7 +20,10 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,8 +76,9 @@ func TestVersionOutput(t *testing.T) {
 }
 
 func TestSyncWithTakeoutDirSucceeds(t *testing.T) {
+	stateDir := t.TempDir()
 	root := newRootCmd()
-	_, err := testExecute(root, "sync", "--takeout-dir", "/tmp/test-takeout")
+	_, err := testExecute(root, "sync", "--takeout-dir", "/tmp/test-takeout", "--state-dir", stateDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -95,18 +99,37 @@ func TestStateDirDefault(t *testing.T) {
 }
 
 func TestSyncWithTakeoutArchive(t *testing.T) {
+	stateDir := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "test.tar")
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tw.Close()
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
 	root := newRootCmd()
-	_, err := testExecute(root, "sync", "--takeout-archive", "/tmp/test.tgz")
+	_, err := testExecute(root, "sync", "--takeout-archive", archivePath, "--state-dir", stateDir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
 func TestSyncWithDeleteAfter(t *testing.T) {
+	stateDir := t.TempDir()
+	archivePath := filepath.Join(t.TempDir(), "test.tar")
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tw.Close()
+	if err := os.WriteFile(archivePath, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
 	root := newRootCmd()
-	_, err := testExecute(root, "sync", "--takeout-archive", "/tmp/test.tgz", "--delete-after")
+	_, err := testExecute(root, "sync", "--takeout-archive", archivePath, "--state-dir", stateDir, "--delete-after")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(archivePath); err == nil {
+		t.Fatal("expected archive to be deleted after sync")
 	}
 }
 

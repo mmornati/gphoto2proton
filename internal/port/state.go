@@ -37,6 +37,7 @@ type FileEntry struct {
 type StateTracker interface {
 	Init(ctx context.Context, sessionID string) error
 	Record(ctx context.Context, fileID string, state domain.State) error
+	RecordFull(ctx context.Context, fileID string, state domain.State, fileName string, fileSize int64, errorMsg string) error
 	RecordAlbum(ctx context.Context, albumID string, state domain.State) error
 	RecordAlbumMembership(ctx context.Context, albumName, fileName string) error
 	AccumulatedAlbums(ctx context.Context) ([]domain.Album, error)
