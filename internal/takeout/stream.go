@@ -47,7 +47,12 @@ func NewStreamReader(paths ...string) port.TakeoutReader {
 	if len(paths) == 0 {
 		return r
 	}
-	expanded := expandMultiPart(paths)
+	var expanded []string
+	if len(paths) > 1 {
+		expanded = expandMultiPart(paths)
+	} else {
+		expanded = paths
+	}
 	for _, p := range expanded {
 		if err := r.openArchive(p); err != nil {
 			r.initErr = err
@@ -196,6 +201,9 @@ func (r *Reader) Next(ctx context.Context) (*domain.Media, io.ReadCloser, error)
 }
 
 func (r *Reader) closeFiles() {
+	if r.files == nil {
+		return
+	}
 	for _, c := range r.files {
 		c.Close()
 	}
