@@ -1,11 +1,16 @@
 # Loop Status
 started: "2026-07-29T00:00:00Z"
 total_stories: 2
-current_index: 0
+current_index: 1
 stories:
   - key: "3-2"
-    status: ci-in-progress
+    status: merged
+    commit: e3ddeea
     pr_number: 10
     pr_url: "https://github.com/mmornati/gphoto2proton/pull/10"
+    ci_attempts: 1
+    ci_total_seconds: 250
+    merged_at: "2026-07-29T18:17:38Z"
+    files_changed: 9
   - key: "3-3"
-    status: pending
+    status: dev-in-progress
