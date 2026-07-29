@@ -648,6 +648,178 @@ func TestPipelineCreateAlbumsStateRecordFailureDoesNotAbort(t *testing.T) {
 	}
 }
 
+type fakeExifProcessor struct {
+	mu       sync.Mutex
+	callLog  []exifCall
+	process  func(ctx context.Context, r io.Reader, meta *domain.MediaMeta) (io.ReadCloser, error)
+}
+
+type exifCall struct {
+	fileName string
+	meta     *domain.MediaMeta
+}
+
+func (f *fakeExifProcessor) Process(ctx context.Context, r io.Reader, meta *domain.MediaMeta) (io.ReadCloser, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.callLog != nil {
+		fn := ""
+		if meta != nil {
+			fn = meta.Description
+		}
+		f.callLog = append(f.callLog, exifCall{fileName: fn, meta: meta})
+	}
+	if f.process != nil {
+		return f.process(ctx, r, meta)
+	}
+	data, _ := io.ReadAll(r)
+	return io.NopCloser(bytes.NewReader(data)), nil
+}
+
+func TestPipelineCallsExifProcessor(t *testing.T) {
+	r := &fakeReader{
+		media: []domain.Media{
+			{Filename: "a.jpg", Metadata: &domain.MediaMeta{DateTimeOriginal: "1609459200"}},
+		},
+		mediaData: map[string][]byte{
+			"a.jpg": []byte("data"),
+		},
+	}
+	u := &fakeUploader{}
+	exif := &fakeExifProcessor{}
+	p := &Pipeline{Reader: r, Uploader: u, Exif: exif}
+
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(u.uploads) != 1 {
+		t.Fatalf("expected 1 upload, got %d", len(u.uploads))
+	}
+}
+
+func TestPipelineExifProcessorFallbackOnError(t *testing.T) {
+	r := &fakeReader{
+		media: []domain.Media{
+			{Filename: "a.jpg", Metadata: &domain.MediaMeta{DateTimeOriginal: "1609459200"}},
+		},
+		mediaData: map[string][]byte{
+			"a.jpg": []byte("data"),
+		},
+	}
+	u := &fakeUploader{}
+	exif := &fakeExifProcessor{
+		process: func(ctx context.Context, r io.Reader, meta *domain.MediaMeta) (io.ReadCloser, error) {
+			_, _ = io.ReadAll(r)
+			return nil, fmt.Errorf("exif boom")
+		},
+	}
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	p := &Pipeline{Reader: r, Uploader: u, Exif: exif, Logger: logger}
+
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(logBuf.String(), "exif processing failed") {
+		t.Errorf("expected exif warning in log, got: %s", logBuf.String())
+	}
+}
+
+func TestPipelineRecordsFullAfterUpload(t *testing.T) {
+	tracker := &fakeStateTracker{}
+	r := &fakeReader{
+		media: []domain.Media{
+			{Filename: "a.jpg"},
+		},
+		mediaData: map[string][]byte{
+			"a.jpg": []byte("data"),
+		},
+	}
+	u := &fakeUploader{}
+	p := &Pipeline{Reader: r, Uploader: u, State: tracker}
+
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tracker.recordFullCalls) != 1 {
+		t.Fatalf("expected 1 RecordFull call, got %d", len(tracker.recordFullCalls))
+	}
+	call := tracker.recordFullCalls[0]
+	if call.fileName != "a.jpg" {
+		t.Errorf("expected fileName a.jpg, got %s", call.fileName)
+	}
+	if call.state != domain.StateUploaded {
+		t.Errorf("expected state uploaded, got %d", call.state)
+	}
+	if call.fileID != "fileID-a.jpg" {
+		t.Errorf("expected fileID fileID-a.jpg, got %s", call.fileID)
+	}
+}
+
+func TestPipelineResumeSkipsDoneFiles(t *testing.T) {
+	r := &fakeReader{
+		media: []domain.Media{
+			{Filename: "a.jpg"},
+			{Filename: "b.jpg"},
+		},
+		mediaData: map[string][]byte{
+			"a.jpg": []byte("a-data"),
+			"b.jpg": []byte("b-data"),
+		},
+	}
+	u := &fakeUploader{}
+	tracker := &fakeStateTracker{
+		fileStatesResult: []port.FileEntry{
+			{FileID: "fileID-a.jpg", FileName: "a.jpg", State: domain.StateUploaded},
+		},
+	}
+	p := &Pipeline{Reader: r, Uploader: u, State: tracker, Resume: true}
+
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(u.uploads) != 1 {
+		t.Fatalf("expected 1 upload (b.jpg), got %d", len(u.uploads))
+	}
+	if u.uploads[0] != "b.jpg" {
+		t.Errorf("expected upload of b.jpg, got %s", u.uploads[0])
+	}
+}
+
+func TestPipelineResumePrePopulatesFileIDMap(t *testing.T) {
+	r := &fakeReader{
+		media: []domain.Media{
+			{Filename: "a.jpg"},
+		},
+		mediaData: map[string][]byte{
+			"a.jpg": []byte("data"),
+		},
+		albums: []domain.Album{
+			{Name: "Album1", FileIDs: []string{"a.jpg"}},
+		},
+	}
+	u := &fakeUploader{}
+	tracker := &fakeStateTracker{
+		fileStatesResult: []port.FileEntry{
+			{FileID: "existing-file-id", FileName: "a.jpg", State: domain.StateUploaded},
+		},
+	}
+	p := &Pipeline{Reader: r, Uploader: u, State: tracker, Resume: true}
+
+	if err := p.Run(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(u.uploads) != 0 {
+		t.Fatalf("expected 0 uploads (a.jpg already done), got %d", len(u.uploads))
+	}
+	if len(u.albums) != 1 {
+		t.Fatalf("expected 1 album, got %d", len(u.albums))
+	}
+	if len(u.albums[0].FileIDs) != 1 || u.albums[0].FileIDs[0] != "existing-file-id" {
+		t.Errorf("expected Proton file ID 'existing-file-id' from resume, got %v", u.albums[0].FileIDs)
+	}
+}
+
 // --- helpers ---
 
 func containsString(s []string, v string) bool {
@@ -660,14 +832,25 @@ func containsString(s []string, v string) bool {
 }
 
 type fakeStateTracker struct {
-	mu        sync.Mutex
-	records   []fakeStateRecord
-	recordErr error
+	mu               sync.Mutex
+	records          []fakeStateRecord
+	recordErr        error
+	recordFullCalls  []fakeRecordFullCall
+	fileStatesResult []port.FileEntry
+	fileStatesErr    error
 }
 
 type fakeStateRecord struct {
 	fileID string
 	state  domain.State
+}
+
+type fakeRecordFullCall struct {
+	fileID   string
+	state    domain.State
+	fileName string
+	fileSize int64
+	errorMsg string
 }
 
 func (f *fakeStateTracker) Init(ctx context.Context, sessionID string) error { return nil }
@@ -678,6 +861,17 @@ func (f *fakeStateTracker) Record(ctx context.Context, fileID string, state doma
 		return f.recordErr
 	}
 	f.records = append(f.records, fakeStateRecord{fileID: fileID, state: state})
+	return nil
+}
+func (f *fakeStateTracker) RecordFull(ctx context.Context, fileID string, state domain.State, fileName string, fileSize int64, errorMsg string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.recordErr != nil {
+		return f.recordErr
+	}
+	f.recordFullCalls = append(f.recordFullCalls, fakeRecordFullCall{
+		fileID: fileID, state: state, fileName: fileName, fileSize: fileSize, errorMsg: errorMsg,
+	})
 	return nil
 }
 func (f *fakeStateTracker) RecordAlbum(ctx context.Context, albumID string, state domain.State) error {
@@ -696,7 +890,14 @@ func (f *fakeStateTracker) AccumulatedAlbums(ctx context.Context) ([]domain.Albu
 	return nil, nil
 }
 func (f *fakeStateTracker) FileStates(ctx context.Context, sessionID string) ([]port.FileEntry, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fileStatesErr != nil {
+		return nil, f.fileStatesErr
+	}
+	out := make([]port.FileEntry, len(f.fileStatesResult))
+	copy(out, f.fileStatesResult)
+	return out, nil
 }
 func (f *fakeStateTracker) Close() error { return nil }
 

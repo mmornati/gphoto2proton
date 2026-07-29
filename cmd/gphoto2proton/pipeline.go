@@ -34,8 +34,10 @@ type Pipeline struct {
 	Reader   port.TakeoutReader
 	Uploader port.ProtonUploader
 	State    port.StateTracker
+	Exif     port.ExifProcessor
 	OnAlbums domain.AlbumHandler
 	Logger   *slog.Logger
+	Resume   bool
 
 	fileIDMap map[string]string
 }
@@ -82,6 +84,26 @@ func (p *Pipeline) recordAlbumMembership(ctx context.Context, albums []domain.Al
 }
 
 func (p *Pipeline) uploadAll(ctx context.Context) error {
+	var resumeDone map[string]bool
+	if p.Resume && p.State != nil {
+		states, err := p.State.FileStates(ctx, "")
+		if err != nil {
+			return fmt.Errorf("pipeline: checking file states for resume: %w", err)
+		}
+		resumeDone = make(map[string]bool, len(states))
+		for _, fs := range states {
+			if fs.FileName != "" && (fs.State == domain.StateUploaded || fs.State == domain.StateSkipped) {
+				resumeDone[fs.FileName] = true
+				if fs.FileID != "" {
+					p.fileIDMap[fs.FileName] = fs.FileID
+				}
+			}
+		}
+		p.logger().Info("resume mode",
+			slog.Int("already_done", len(resumeDone)),
+		)
+	}
+
 	for {
 		media, rc, err := p.Reader.Next(ctx)
 		if errors.Is(err, io.EOF) {
@@ -89,6 +111,10 @@ func (p *Pipeline) uploadAll(ctx context.Context) error {
 		}
 		if err != nil {
 			return fmt.Errorf("pipeline: reading next media: %w", err)
+		}
+		if resumeDone != nil && resumeDone[media.Filename] {
+			rc.Close()
+			continue
 		}
 		if err := p.processMedia(ctx, media, rc); err != nil {
 			return err
@@ -105,15 +131,38 @@ func (p *Pipeline) processMedia(ctx context.Context, media *domain.Media, rc io.
 	}
 	defer rc.Close()
 
+	readCloser := rc
+	if p.Exif != nil {
+		processed, err := p.Exif.Process(ctx, rc, media.Metadata)
+		if err != nil {
+			p.logger().Warn("exif processing failed, using original stream",
+				slog.String("file", media.Filename),
+				slog.String("error", err.Error()),
+			)
+		}
+		if processed != nil {
+			readCloser = processed
+		}
+	}
+
 	if p.Uploader == nil {
 		return nil
 	}
-	fileID, err := p.Uploader.Upload(ctx, media.Filename, rc)
+	fileID, err := p.Uploader.Upload(ctx, media.Filename, readCloser)
 	if err != nil {
 		return fmt.Errorf("pipeline: uploading %s: %w", media.Filename, err)
 	}
 	if fileID != "" {
 		p.fileIDMap[media.Filename] = fileID
+	}
+
+	if p.State != nil {
+		if err := p.State.RecordFull(ctx, fileID, domain.StateUploaded, media.Filename, 0, ""); err != nil {
+			p.logger().Warn("recording file state failed",
+				slog.String("file", media.Filename),
+				slog.String("error", err.Error()),
+			)
+		}
 	}
 	return nil
 }

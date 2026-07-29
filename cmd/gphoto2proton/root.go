@@ -22,14 +22,18 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
 	"github.com/mmornati/gphoto2proton/internal/domain"
+	"github.com/mmornati/gphoto2proton/internal/exif"
+	"github.com/mmornati/gphoto2proton/internal/port"
 	"github.com/mmornati/gphoto2proton/internal/proton"
 	"github.com/mmornati/gphoto2proton/internal/state"
+	"github.com/mmornati/gphoto2proton/internal/takeout"
 )
 
 var Version = "dev"
@@ -67,27 +71,74 @@ to Proton Drive with streaming, EXIF restoration, album recreation, and resume s
 			if takeoutDir != "" && takeoutArchive != "" {
 				return errors.New("--takeout-dir and --takeout-archive are mutually exclusive")
 			}
-			albumRecreate, _ := cmd.Flags().GetBool("album-recreate")
 			resume, _ := cmd.Flags().GetBool("resume")
 			stateDir, _ := cmd.Flags().GetString("state-dir")
 			deleteAfter, _ := cmd.Flags().GetBool("delete-after")
 
-			if takeoutArchive != "" {
-				fmt.Fprintf(os.Stderr, "sync called with takeout-archive=%s delete-after=%v album-recreate=%v resume=%v state-dir=%s (not yet implemented)\n",
-					takeoutArchive, deleteAfter, albumRecreate, resume, stateDir)
-			} else {
-				fmt.Fprintf(os.Stderr, "sync called with takeout-dir=%s album-recreate=%v resume=%v state-dir=%s (not yet implemented)\n",
-					takeoutDir, albumRecreate, resume, stateDir)
+			stateDBPath := filepath.Join(stateDir, "state.db")
+			tracker, err := state.NewSQLiteTracker(stateDBPath)
+			if err != nil {
+				return fmt.Errorf("opening state database: %w", err)
 			}
+			defer tracker.Close()
+
+			var reader port.TakeoutReader
+			if takeoutArchive != "" {
+				reader = takeout.NewStreamReader(takeoutArchive)
+			} else {
+				dr, err := takeout.NewDirReader(takeoutDir)
+				if err != nil {
+					return fmt.Errorf("reading takeout directory: %w", err)
+				}
+				reader = dr
+			}
+
+			exifProcessor := exif.NewProcessor()
+
+			username, _ := cmd.Flags().GetString("username")
+			password, _ := cmd.Flags().GetString("password")
+			var uploader port.ProtonUploader
+			if username != "" && password != "" {
+				credStore := proton.NewCredentialStore(stateDir)
+				up, err := proton.NewUploader(cmd.Context(), username, password, credStore)
+				if err != nil {
+					return fmt.Errorf("creating uploader: %w", err)
+				}
+				uploader = up
+			} else {
+				slog.Warn("--username/--password not set, upload disabled")
+			}
+
+			p := &Pipeline{
+				Reader:   reader,
+				Uploader: uploader,
+				State:    tracker,
+				Exif:     exifProcessor,
+				Logger:   slog.Default(),
+				Resume:   resume,
+			}
+
+			if err := p.Run(cmd.Context()); err != nil {
+				return fmt.Errorf("pipeline run failed: %w", err)
+			}
+
+			if deleteAfter && takeoutArchive != "" {
+				if err := os.Remove(takeoutArchive); err != nil {
+					return fmt.Errorf("deleting archive: %w", err)
+				}
+			}
+
 			return nil
 		},
 	}
 	sync.Flags().String("takeout-dir", "", "Path to extracted Google Takeout directory")
 	sync.Flags().String("takeout-archive", "", "Path to a single Google Takeout .tgz archive")
 	sync.Flags().Bool("delete-after", false, "Delete the archive file after successful processing")
-	sync.Flags().Bool("album-recreate", false, "Recreate albums in Proton Drive (no-op until Epic 2)")
 	sync.Flags().Bool("resume", false, "Skip completed files and retry failed ones")
 	sync.Flags().String("state-dir", defaultStateDir, "Directory for SQLite state database")
+	sync.Flags().Bool("album-recreate", false, "Recreate albums in Proton Drive (no-op until Epic 2)")
+	sync.Flags().String("username", "", "Proton account username (email)")
+	sync.Flags().String("password", "", "Proton account password")
 
 	albumsFinalize := &cobra.Command{
 		Use:   "albums-finalize",
@@ -99,6 +150,10 @@ This should be run after all archives have been processed.`,
 			stateDir, _ := cmd.Flags().GetString("state-dir")
 			username, _ := cmd.Flags().GetString("username")
 			password, _ := cmd.Flags().GetString("password")
+
+			if username == "" || password == "" {
+				return fmt.Errorf("--username and --password are required for albums-finalize")
+			}
 
 			dbPath := filepath.Join(stateDir, "state.db")
 			tracker, err := state.NewSQLiteTracker(dbPath)

@@ -23,6 +23,7 @@ type Media struct {
 	ID       string
 	Filename string
 	AlbumIDs []string
+	Metadata *MediaMeta
 }
 
 type MediaMeta struct {
