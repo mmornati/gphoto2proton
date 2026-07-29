@@ -15,7 +15,7 @@ last_updated: 2026-07-29
 
 development_status:
   # ── Epic 3: Archive-Aware Streaming & Cross-Archive Albums ──────────────
-  epic-3: in-progress
+  epic-3: done
 
   # Process archives one by one with streaming, download management,
   # and cross-archive album persistence
@@ -25,4 +25,4 @@ development_status:
   3-2-pipeline-wiring: done
 
   # Remove schema duplication, add nil-guard, scope expandMultiPart
-  3-3-schema-hardening: in-progress
+  3-3-schema-hardening: done

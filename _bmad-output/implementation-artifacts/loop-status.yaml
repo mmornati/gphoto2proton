@@ -1,7 +1,9 @@
 # Loop Status
 started: "2026-07-29T00:00:00Z"
+finished: "2026-07-29T18:25:00Z"
+status: done
 total_stories: 2
-current_index: 1
+current_index: 2
 stories:
   - key: "3-2"
     status: merged
@@ -13,4 +15,11 @@ stories:
     merged_at: "2026-07-29T18:17:38Z"
     files_changed: 9
   - key: "3-3"
-    status: dev-in-progress
+    status: merged
+    commit: a48267c
+    pr_number: 11
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/11"
+    ci_attempts: 1
+    ci_total_seconds: 130
+    merged_at: "2026-07-29T18:24:00Z"
+    files_changed: 4
