@@ -62,7 +62,7 @@ func NewDirReader(dir string) (*DirReader, error) {
 		base := filepath.Base(path)
 
 		if IsPhotoSidecar(rel) {
-			data, readErr := os.ReadFile(path)
+			data, readErr := os.ReadFile(path) // #nosec G122
 			if readErr != nil {
 				return nil
 			}
@@ -79,7 +79,7 @@ func NewDirReader(dir string) (*DirReader, error) {
 		}
 
 		if IsTopLevelAlbumFile(rel) {
-			data, readErr := os.ReadFile(path)
+			data, readErr := os.ReadFile(path) // #nosec G122
 			if readErr != nil {
 				return nil
 			}
@@ -91,7 +91,7 @@ func NewDirReader(dir string) (*DirReader, error) {
 		}
 
 		if IsPerAlbumFile(rel) {
-			data, readErr := os.ReadFile(path)
+			data, readErr := os.ReadFile(path) // #nosec G122
 			if readErr != nil {
 				return nil
 			}

@@ -4,6 +4,8 @@ total_stories: 2
 current_index: 0
 stories:
   - key: "3-2"
-    status: pr-in-progress
+    status: ci-in-progress
+    pr_number: 10
+    pr_url: "https://github.com/mmornati/gphoto2proton/pull/10"
   - key: "3-3"
     status: pending
