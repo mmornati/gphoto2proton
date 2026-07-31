@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	_ "modernc.org/sqlite"
 
@@ -17,6 +19,9 @@ type SQLiteTracker struct {
 }
 
 func NewSQLiteTracker(dbPath string) (*SQLiteTracker, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+		return nil, fmt.Errorf("creating state directory: %w", err)
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)

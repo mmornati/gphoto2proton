@@ -23,6 +23,23 @@ func TestNewSQLiteTracker_CreatesTable(t *testing.T) {
 	}
 }
 
+func TestNewSQLiteTracker_CreatesParentDir(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nested", "state", "state.db")
+
+	tracker, err := NewSQLiteTracker(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteTracker failed for non-existent parent dir: %v", err)
+	}
+	defer tracker.Close()
+
+	if _, err := os.Stat(filepath.Dir(dbPath)); err != nil {
+		t.Fatalf("parent directory was not created: %v", err)
+	}
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("db file not created: %v", err)
+	}
+}
+
 func TestRecord_InsertAndUpdate(t *testing.T) {
 	tracker, _ := newTracker(t, "session-1")
 	defer tracker.Close()

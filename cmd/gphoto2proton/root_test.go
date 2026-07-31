@@ -182,10 +182,14 @@ func TestAlbumsFinalizeHelp(t *testing.T) {
 	}
 }
 
-func TestAlbumsFinalizeNoDatabase(t *testing.T) {
+func TestSyncCreatesStateDir(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), "nested", "state")
 	root := newRootCmd()
-	_, err := testExecute(root, "albums-finalize", "--state-dir", "/nonexistent/path/that/does/not/exist")
-	if err == nil {
-		t.Fatal("expected error when state directory does not exist")
+	_, err := testExecute(root, "sync", "--takeout-dir", "/tmp/test-takeout", "--state-dir", stateDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, "state.db")); err != nil {
+		t.Errorf("expected state.db to be created in %s: %v", stateDir, err)
 	}
 }
