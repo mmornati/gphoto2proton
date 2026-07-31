@@ -11,18 +11,22 @@ import (
 )
 
 func TestProtonAppVersionFormat(t *testing.T) {
-	// Proton only accepts third-party app versions matching the documented
-	// external-drive-<project>@<semver> format where project conforms to
-	// (-[a-z_]+)+; otherwise the auth/info request fails with API error 2064.
-	pattern := regexp.MustCompile(`^external-drive(-[a-z_]+)+@[0-9]+\.[0-9]+\.[0-9]+$`)
+	// Live-verified (2026-07-31, POST /auth/v4/info) acceptance rule,
+	// intersected with the stricter regex published by a Proton Drive
+	// engineer in rclone/rclone#9189: the project name is a single section
+	// of lowercase letters/underscores (inner dashes are rejected live with
+	// 2064 "Invalid section name"), followed by semver and a channel suffix.
+	pattern := regexp.MustCompile(`^external-drive-[a-z_]+@[0-9]+\.[0-9]+\.[0-9]+-(stable|beta|RC|alpha|dev)([.-]?[0-9]+)*$`)
 	if !pattern.MatchString(protonAppVersion) {
-		t.Fatalf("protonAppVersion %q does not match external-drive-<project>@<semver> format", protonAppVersion)
+		t.Fatalf("protonAppVersion %q does not match the live-verified Proton app-version format", protonAppVersion)
 	}
 }
 
 func TestProtonUserAgentFormat(t *testing.T) {
-	// Proton requires the User-Agent to be <platform>-<product> separated
-	// by a dash, otherwise the auth/info request fails with API error 2064.
+	// Proton does not appear to validate the User-Agent server-side (rclone
+	// sends "rclone/vX.Y.Z" with no dash and works). We still send a
+	// <platform>-<product> shaped value to look like a first-party client;
+	// this test just guards the convention.
 	ua := protonUserAgent()
 	if !strings.Contains(ua, "-") {
 		t.Fatalf("user agent %q is missing the required platform-product dash", ua)

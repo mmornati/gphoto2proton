@@ -259,6 +259,7 @@ func (a *AlbumAdapter) doOnce(ctx context.Context, method, path string, body []b
 	}
 	req.Header.Set("Authorization", "Bearer "+cred.AccessToken)
 	req.Header.Set("x-pm-uid", cred.UID)
+	req.Header.Set("x-pm-appversion", protonAppVersion)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", protonUserAgent())
