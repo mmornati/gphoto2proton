@@ -12,16 +12,45 @@ safely delete Google Photos after verifying your migration.
 
 ### Do I need to extract the .tgz files?
 
-Yes. The streaming reader works on extracted directories, not raw archives.
-Each `takeout-*.tgz` must be extracted:
+**No.** gphoto2proton works directly on the `.tgz` archives you download from
+Google Takeout — no extraction and no extra disk space needed.
+
+**Recommended — archive mode:**
+
+```bash
+gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me --password 'secret'
+gphoto2proton sync --takeout-archive takeout-002.tgz --delete-after
+# ... one run per archive, then:
+gphoto2proton albums-finalize
+```
+
+**Alternative — directory mode** (if you already extracted them):
 
 ```bash
 for f in takeout-*.tgz; do
   tar xzf "$f" -C ~/Takeout
 done
+gphoto2proton sync --takeout-dir ~/Takeout/Takeout
 ```
 
-Then point `--takeout-dir` at the resulting `Takeout/` directory.
+---
+
+### Can I run this on a headless / remote server? Does login need a browser?
+
+**Yes, fully headless.** gphoto2proton does **not** use OAuth2 and never opens
+a browser — there is no "authorize in your local browser" step. Login is done
+directly against the Proton API with your username and password (SRP protocol)
+via the Proton SDK.
+
+Pass credentials on the first run:
+
+```bash
+gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me --password 'secret'
+```
+
+The session is saved to `~/.gphoto2proton/state/session.json` and reused
+afterwards, so later runs (and `albums-finalize`) need no credentials. See
+[Authentication](authentication.md) for details, including the 2FA limitation.
 
 ---
 
@@ -46,8 +75,8 @@ Not in a single run. Run the tool separately for each account, each with its
 own state directory:
 
 ```bash
-gphoto2proton sync --takeout-dir ~/Takeout --state-dir ~/.gphoto2proton/account1
-gphoto2proton sync --takeout-dir ~/Takeout --state-dir ~/.gphoto2proton/account2
+gphoto2proton sync --takeout-archive takeout-001.tgz --username account1@proton.me --password 'secret' --state-dir ~/.gphoto2proton/account1
+gphoto2proton sync --takeout-archive takeout-001.tgz --username account2@proton.me --password 'secret' --state-dir ~/.gphoto2proton/account2
 ```
 
 ---

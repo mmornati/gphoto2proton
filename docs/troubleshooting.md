@@ -33,19 +33,26 @@ The tool detects `exiftool` automatically on next run.
 **Symptoms:**
 
 - Error: `authentication failed` or `invalid credentials`
+- Error: `creating uploader: ... ErrUsernameAndPasswordRequired`
+- Error: `2FA code required` / `Err2FACodeRequired`
 
 **Solutions:**
 
-1. Clear cached credentials and re-authenticate:
+1. Clear the saved session and re-authenticate:
 
    ```bash
-   rm -rf ~/.gphoto2proton
-   gphoto2proton sync --takeout-dir ~/Takeout
+   rm -f ~/.gphoto2proton/state/session.json
+   gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me --password 'secret'
    ```
 
-2. Verify your Proton credentials (username + password) are correct
+2. Verify your Proton username (email) and password are correct. The first run
+   requires both `--username` and `--password`; later runs reuse the saved
+   session and do not need them.
 
-3. If using 2FA, check if Proton-API-Bridge supports your auth method
+3. If you see `2FA code required`: the account has two-factor authentication
+   (TOTP) enabled, which is not supported yet. See
+   [Authentication → 2FA](authentication.md#two-factor-authentication-2fa--not-yet-supported)
+   for workarounds.
 
 ---
 
@@ -77,16 +84,22 @@ The tool detects `exiftool` automatically on next run.
 
 **Solutions:**
 
-1. Ensure you passed the `--album-recreate` flag
-2. Verify that Proton Photos API is available (the tool uses a separate HTTP
-   client for album operations, not the Drive SDK)
-3. Check that photos were uploaded successfully first — albums can only be
+1. Verify that photos were uploaded successfully first — albums can only be
    created with Proton file IDs from uploaded photos
-4. Run with resume to retry failed albums:
+2. If you migrate several archives, make sure you have processed **all** of
+   them and then run `albums-finalize` to create the accumulated albums:
 
    ```bash
-   gphoto2proton sync --takeout-dir ~/Takeout --album-recreate --resume
+   gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me --password 'secret'
+   gphoto2proton sync --takeout-archive takeout-002.tgz
+   # ... all archives ...
+   gphoto2proton albums-finalize
    ```
+
+3. The tool uses a separate HTTP client for album operations (the Proton
+   Photos API), not the Drive SDK — a missing `session.json` or an expired
+   session causes album calls to fail
+4. Run with `--resume` to retry failed files before finalizing albums
 
 ---
 
@@ -121,7 +134,7 @@ The tool detects `exiftool` automatically on next run.
 - Use the `--resume` flag to retry failed files:
 
   ```bash
-  gphoto2proton sync --takeout-dir ~/Takeout --resume
+  gphoto2proton sync --takeout-archive takeout-001.tgz --resume
   ```
 
 - Consider running the migration overnight for large libraries
@@ -135,27 +148,9 @@ The tool detects `exiftool` automatically on next run.
 Run with the `--resume` flag:
 
 ```bash
-gphoto2proton sync --takeout-dir ~/Takeout --resume
+gphoto2proton sync --takeout-archive takeout-001.tgz --resume
 ```
 
 The tool reads the SQLite state database to determine which files were
 successfully uploaded and which failed, then picks up from where it left off.
 No files are re-uploaded unless they previously failed.
-
----
-
-## "not yet implemented" message
-
-**Symptoms:**
-
-- Running sync shows: `sync called with ... (not yet implemented)`
-
-**Solution:**
-
-This is a stub message in the current version. The pipeline logic is
-implemented and tested, but the CLI command wiring is still in development.
-Run the tests to verify:
-
-```bash
-go test ./...
-```

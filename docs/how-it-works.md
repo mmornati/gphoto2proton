@@ -11,15 +11,24 @@ graph TD
     D --> F[5. State Tracker]
 
     B -->|album manifest| E
+    B -->|album membership| F
     F -.->|resume state| D
+    F -.->|accumulated albums| E
 ```
 
 ---
 
 ## 1. Streaming Reader
 
-Instead of extracting gigabytes to disk, the reader processes tar/tgz archives
-entry-by-entry in memory.
+Two input modes are supported, both implementing the same streaming interface:
+
+| Mode | Flag | Behaviour |
+|------|------|-----------|
+| Archive (recommended) | `--takeout-archive <file.tgz>` | Reads a `.tgz`/`.tar.gz` directly, entry-by-entry — **no extraction, no extra disk space** |
+| Directory | `--takeout-dir <dir>` | Walks an already-extracted `Takeout/` directory |
+
+Instead of extracting gigabytes to disk, the archive reader decompresses the
+gzip stream and iterates tar entries in memory:
 
 ```mermaid
 graph LR
@@ -33,8 +42,12 @@ graph LR
     G --> I[AlbumManifest: album<br/>→ file membership]
 ```
 
-The reader also extracts the album manifest from Google's `metadata.json`,
-mapping which photos belong to which albums.
+The reader also extracts album manifests from Google's `metadata.json` and the
+per-photo sidecars, mapping which photos belong to which albums. When you
+process multiple archives in separate `sync` runs, this membership is recorded
+to the SQLite state database after each run, so **albums that span multiple
+archives are accumulated** and finally recreated by `gphoto2proton
+albums-finalize`.
 
 ---
 
@@ -73,8 +86,8 @@ Uploads photos to Proton Drive using the Proton-API-Bridge SDK.
 ```mermaid
 graph TD
     A[Photo stream] --> B[Proton-API-Bridge<br/>SDK]
-    B --> C{Authenticated?}
-    C -->|No| D[Credential prompt]
+    B --> C{Session saved?}
+    C -->|No| D[Login with<br/>--username / --password]
     D --> E[Session stored<br/>locally]
     E --> B
     C -->|Yes| F[Upload to Proton Drive]
@@ -83,10 +96,14 @@ graph TD
 
 The uploader:
 
+- Authenticates directly with the Proton API (SRP login) — no OAuth2, no
+  browser, fully headless
 - Detects MIME type from file extension
 - Streams the photo data directly — no temp file on disk
-- Stores session credentials for reuse
+- Saves the authenticated session for reuse on later runs
 - Maps local filenames to Proton file IDs for album creation
+
+See [Authentication](authentication.md) for the full login story.
 
 **Supported formats:**
 
@@ -105,10 +122,13 @@ The uploader:
 
 ## 4. Album Creator
 
-After all photos are uploaded, the album stage recreates your Google Photos
-albums inside Proton Photos.
+Albums are created from the album manifest of the current input. When you
+process several archives across multiple `sync` runs, album membership is also
+persisted to the state database after every run; the `gphoto2proton
+albums-finalize` command then recreates the accumulated, cross-archive albums in
+one pass.
 
-For each album from the Takeout manifest:
+For each album:
 
 1. Looks up the Proton file ID for each photo in the album
 2. Creates the album via the Proton Photos HTTP API
@@ -127,9 +147,10 @@ A SQLite database (pure Go, no CGo) tracks every file's migration state:
 - **Failed** — Upload error occurred
 - **Skipped** — Skipped (resume mode, already uploaded)
 
-On resume, the tracker identifies completed files (skipped) and failed files
-(retried), ensuring the migration picks up exactly where it left off without
-re-uploading anything.
+It also keeps an `album_members` table that accumulates album membership across
+archive runs. On resume, the tracker identifies completed files (skipped) and
+failed files (retried), ensuring the migration picks up exactly where it left
+off without re-uploading anything.
 
 ---
 

@@ -1,7 +1,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/go-1.26.5-blue?style=flat-square" alt="Go 1.26.5"/>
-  <img src="https://img.shields.io/badge/tests-113_passing-brightgreen?style=flat-square" alt="113 tests passing"/>
+  <img src="https://img.shields.io/badge/tests-126_passing-brightgreen?style=flat-square" alt="126 tests passing"/>
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="MIT License"/>
   <img src="https://img.shields.io/badge/status-active_development-yellow?style=flat-square" alt="Active Development"/>
 </p>
@@ -18,8 +18,9 @@
                          └──────────────────────┘
 ```
 
-Migrate hundreds of gigabytes from Google Photos Takeout to Proton Drive without
-unpacking archives, losing EXIF metadata, or leaving your albums behind.
+Migrate hundreds of gigabytes from Google Photos Takeout to Proton Drive
+**without unpacking archives**, losing EXIF metadata, or leaving your albums
+behind.
 
 ---
 
@@ -27,11 +28,11 @@ unpacking archives, losing EXIF metadata, or leaving your albums behind.
 
 | | Feature | Details |
 |---|---|---|
-| ⚡ | **Streaming** | Processes tar/tgz archives entry-by-entry — no full extraction, no 2× disk space |
+| ⚡ | **Streaming** | Works directly on the `.tgz` archives as downloaded — no extraction, no 2× disk space |
 | 📸 | **EXIF Restoration** | Writes `DateTimeOriginal`, GPS coordinates, and camera metadata via `exiftool` |
-| 🖼️ | **Album Recreation** | Rebuilds your Google Photos albums inside Proton Photos automatically |
+| 🖼️ | **Album Recreation** | Rebuilds your Google Photos albums inside Proton Photos automatically, even across archives |
 | 🔁 | **Resume Safety** | SQLite-backed state tracker — interrupt and resume without re-uploading |
-| 🔒 | **Zero Leaks** | Authenticates via Proton-API-Bridge SDK; your credentials never leave your machine |
+| 🔒 | **Headless Auth** | Authenticates via the Proton API (no OAuth2, no browser); credentials never leave your machine |
 
 ---
 
@@ -42,7 +43,7 @@ unpacking archives, losing EXIF metadata, or leaving your albums behind.
 ```bash
 brew tap mmornati/gphoto2proton https://github.com/mmornati/gphoto2proton
 brew install gphoto2proton exiftool
-gphoto2proton sync --takeout-dir ~/Takeout
+gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me --password 'secret'
 ```
 
 ### From source
@@ -56,15 +57,25 @@ git clone https://github.com/mmornati/gphoto2proton.git
 cd gphoto2proton
 go build -o gphoto2proton ./cmd/gphoto2proton
 
-# Run
-./gphoto2proton sync --takeout-dir ~/Takeout
+# Run — process .tgz archives directly (no extraction needed)
+./gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me --password 'secret'
 
-# With album recreation
-./gphoto2proton sync --takeout-dir ~/Takeout --album-recreate
+# Directory mode (if already extracted)
+./gphoto2proton sync --takeout-dir ~/Takeout/Takeout
+
+# Process each archive, delete after success, then recreate albums
+./gphoto2proton sync --takeout-archive takeout-001.tgz --delete-after
+./gphoto2proton sync --takeout-archive takeout-002.tgz
+# ... all archives ...
+./gphoto2proton albums-finalize
 
 # Resume an interrupted migration
-./gphoto2proton sync --takeout-dir ~/Takeout --resume
+./gphoto2proton sync --takeout-archive takeout-001.tgz --resume
 ```
+
+Credentials are only needed on the first run — the session is saved to
+`~/.gphoto2proton/state/session.json` and reused afterwards. See
+[docs/authentication.md](docs/authentication.md) for headless-server details.
 
 ### Download pre-built binary
 
@@ -137,18 +148,22 @@ with mocks and straightforward to extend.
 ## Commands
 
 ```
-gphoto2proton sync     Run the migration pipeline
-gphoto2proton version  Print version
+gphoto2proton sync             Run the migration pipeline (archive or directory)
+gphoto2proton albums-finalize  Create accumulated albums in Proton Photos
+gphoto2proton version          Print version
 ```
 
 ### sync flags
 
 | Flag | Default | Description |
 |---|---|---|
-| `--takeout-dir` | — | Path to extracted Google Takeout directory **(required)** |
-| `--album-recreate` | `false` | Recreate albums in Proton Photos |
+| `--takeout-archive` | — | Path to a single Takeout `.tgz` archive **(one of the two required)** |
+| `--takeout-dir` | — | Path to an extracted Takeout directory **(one of the two required)** |
+| `--delete-after` | `false` | Delete the archive after successful processing |
+| `--username` | — | Proton username (email) — required on first login |
+| `--password` | — | Proton password — required on first login |
 | `--resume` | `false` | Skip completed files, retry failed ones |
-| `--state-dir` | `~/.gphoto2proton/state` | SQLite state database location |
+| `--state-dir` | `~/.gphoto2proton/state` | SQLite state + saved session location |
 
 ---
 
@@ -156,7 +171,7 @@ gphoto2proton version  Print version
 
 ```bash
 go build ./cmd/gphoto2proton       # Build
-go test ./...                       # Run all 113 tests
+go test ./...                       # Run all 126 tests
 go vet ./...                        # Static analysis
 ```
 

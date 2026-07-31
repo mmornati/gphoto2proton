@@ -71,21 +71,24 @@ migration:
 ```
 Pipeline.Run()
 ├── uploadAll()
-│   └── loop: Reader.Next() → Uploader.Upload()
+│   └── loop: Reader.Next() → Exif.Process() → Uploader.Upload() → State.RecordFull()
 ├── Reader.AlbumManifest()
+├── recordAlbumMembership()   → State.RecordAlbumMembership() per album/file
 └── createAlbums()
     └── loop: Uploader.CreateAlbum()
 ```
 
-Source: `cmd/gphoto2proton/pipeline.go:43`
+Source: `cmd/gphoto2proton/pipeline.go:45`
 
 ```go
 type Pipeline struct {
     Reader   port.TakeoutReader
     Uploader port.ProtonUploader
     State    port.StateTracker
+    Exif     port.ExifProcessor
     OnAlbums domain.AlbumHandler
     Logger   *slog.Logger
+    Resume   bool
 }
 ```
 
@@ -127,7 +130,10 @@ type ProtonUploader interface {
 type StateTracker interface {
     Init(ctx context.Context, sessionID string) error
     Record(ctx context.Context, fileID string, state domain.State) error
+    RecordFull(ctx context.Context, fileID string, state domain.State, fileName string, fileSize int64, errorMsg string) error
     RecordAlbum(ctx context.Context, albumID string, state domain.State) error
+    RecordAlbumMembership(ctx context.Context, albumName, fileName string) error
+    AccumulatedAlbums(ctx context.Context) ([]domain.Album, error)
     FileStates(ctx context.Context, sessionID string) ([]FileEntry, error)
     Close() error
 }
@@ -147,7 +153,7 @@ Each adapter is tested independently with mocked dependencies:
 | `state` | `state_test.go` | In-memory SQLite |
 | `cmd/gphoto2proton` | `root_test.go`, `pipeline_test.go` | Mock readers/uploaders |
 
-All 113 tests pass on `main`. Run them with:
+All 126 tests pass on `main`. Run them with:
 
 ```bash
 go test -v -race -coverprofile=coverage.out ./...
