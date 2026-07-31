@@ -50,9 +50,16 @@ The tool detects `exiftool` automatically on next run.
    session and do not need them.
 
 3. If you see `2FA code required`: the account has two-factor authentication
-   (TOTP) enabled, which is not supported yet. See
-   [Authentication → 2FA](authentication.md#two-factor-authentication-2fa--not-yet-supported)
-   for workarounds.
+   (TOTP) enabled. Pass the current code from your authenticator app with
+   `--twofa` on the first login:
+
+   ```bash
+   gphoto2proton sync --takeout-archive takeout-001.tgz \
+     --username user@proton.me --password 'secret' --twofa 123456
+   ```
+
+   See [Authentication → 2FA](authentication.md#two-factor-authentication-2fa)
+   for details.
 
 ---
 

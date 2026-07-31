@@ -34,7 +34,7 @@ type Uploader struct {
 	albumClient *AlbumAdapter
 }
 
-func NewUploader(ctx context.Context, username, password string, credStore *CredentialStore) (port.ProtonUploader, error) {
+func NewUploader(ctx context.Context, username, password, twoFA string, credStore *CredentialStore) (port.ProtonUploader, error) {
 	config := common.NewConfigWithDefaultValues()
 	config.AppVersion = "gphoto2proton"
 	config.UserAgent = "gphoto2proton"
@@ -52,6 +52,7 @@ func NewUploader(ctx context.Context, username, password string, credStore *Cred
 		config.FirstLoginCredential = &common.FirstLoginCredentialData{
 			Username: username,
 			Password: password,
+			TwoFA:    twoFA,
 		}
 	}
 

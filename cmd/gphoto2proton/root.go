@@ -97,10 +97,11 @@ to Proton Drive with streaming, EXIF restoration, album recreation, and resume s
 
 			username, _ := cmd.Flags().GetString("username")
 			password, _ := cmd.Flags().GetString("password")
+			twoFA, _ := cmd.Flags().GetString("twofa")
 			var uploader port.ProtonUploader
 			if username != "" && password != "" {
 				credStore := proton.NewCredentialStore(stateDir)
-				up, err := proton.NewUploader(cmd.Context(), username, password, credStore)
+				up, err := proton.NewUploader(cmd.Context(), username, password, twoFA, credStore)
 				if err != nil {
 					return fmt.Errorf("creating uploader: %w", err)
 				}
@@ -139,6 +140,7 @@ to Proton Drive with streaming, EXIF restoration, album recreation, and resume s
 	sync.Flags().Bool("album-recreate", false, "Recreate albums in Proton Drive (no-op until Epic 2)")
 	sync.Flags().String("username", "", "Proton account username (email)")
 	sync.Flags().String("password", "", "Proton account password")
+	sync.Flags().String("twofa", "", "Proton account TOTP 2FA code (only needed on first login)")
 
 	albumsFinalize := &cobra.Command{
 		Use:   "albums-finalize",
@@ -150,6 +152,7 @@ This should be run after all archives have been processed.`,
 			stateDir, _ := cmd.Flags().GetString("state-dir")
 			username, _ := cmd.Flags().GetString("username")
 			password, _ := cmd.Flags().GetString("password")
+			twoFA, _ := cmd.Flags().GetString("twofa")
 
 			if username == "" || password == "" {
 				return fmt.Errorf("--username and --password are required for albums-finalize")
@@ -185,7 +188,7 @@ This should be run after all archives have been processed.`,
 			}
 
 			credStore := proton.NewCredentialStore(stateDir)
-			uploader, err := proton.NewUploader(cmd.Context(), username, password, credStore)
+			uploader, err := proton.NewUploader(cmd.Context(), username, password, twoFA, credStore)
 			if err != nil {
 				return fmt.Errorf("creating uploader: %w", err)
 			}
@@ -220,6 +223,7 @@ This should be run after all archives have been processed.`,
 	albumsFinalize.Flags().String("state-dir", defaultStateDir, "Directory for SQLite state database")
 	albumsFinalize.Flags().String("username", "", "Proton account username (email)")
 	albumsFinalize.Flags().String("password", "", "Proton account password")
+	albumsFinalize.Flags().String("twofa", "", "Proton account TOTP 2FA code (only needed on first login)")
 
 	version := &cobra.Command{
 		Use:   "version",

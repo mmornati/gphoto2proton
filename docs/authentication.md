@@ -63,22 +63,28 @@ rm -f ~/.gphoto2proton/state/session.json
 
 ---
 
-## Two-factor authentication (2FA) — not yet supported
+## Two-factor authentication (2FA)
 
-Accounts with **TOTP two-factor authentication enabled** cannot complete the
-first login with this tool yet. The login flow fails with a
-`2FA code required` error because the current release does not accept a
-one-time code.
+Accounts with **TOTP two-factor authentication enabled** are supported. The
+first login asks Proton for a one-time code; pass it with `--twofa`:
 
-Workarounds:
+```bash
+gphoto2proton sync \
+  --takeout-archive takeout-001.tgz \
+  --username you@example.com \
+  --password 'your-password' \
+  --twofa 123456
+```
 
-- **Temporarily disable 2FA** in your Proton account settings, complete the
-  first login (the session is then saved), and re-enable 2FA. The saved
-  session keeps working after 2FA is turned back on.
-- If you already have a valid session file from a tool that supports 2FA, place
-  it at `<state-dir>/session.json` and it will be reused.
+`--twofa` is a TOTP code (6 digits from your authenticator app). It is only
+needed on the **first login**. After the session is saved to
+`~/.gphoto2proton/state/session.json`, later runs reuse the saved session and
+do not need `--username`, `--password`, or `--twofa` — even if the account
+keeps 2FA enabled, because the saved session is authenticated.
 
-Non-2FA accounts are unaffected.
+If you omit `--twofa` on an account that has 2FA enabled, the first login
+fails with a `2FA code required` error. Pass the current code and retry.
+
 
 ---
 

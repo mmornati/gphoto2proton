@@ -159,4 +159,5 @@ rm -f ~/.gphoto2proton/state/session.json
 ```
 
 See [Authentication](authentication.md) for details on how login works,
-including headless servers and 2FA.
+including headless servers and 2FA. If your account has **2FA (TOTP)
+enabled**, pass the current code with the `--twofa` flag on the first login.

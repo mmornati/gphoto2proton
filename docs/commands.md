@@ -42,6 +42,7 @@ gphoto2proton sync [flags]
 | `--delete-after` | `bool` | `false` | No | Delete the archive file after it was processed successfully |
 | `--username` | `string` | — | Yes* | Proton account username (email) for the first login |
 | `--password` | `string` | — | Yes* | Proton account password for the first login |
+| `--twofa` | `string` | — | Only if 2FA* | Proton account TOTP code from your authenticator app (first login only) |
 | `--resume` | `bool` | `false` | No | Skip completed files and retry failed ones |
 | `--state-dir` | `string` | `~/.gphoto2proton/state` | No | Directory for the SQLite state database and saved session |
 | `--album-recreate` | `bool` | `false` | No | Accepted for backward compatibility (albums are now created automatically) |
@@ -49,6 +50,8 @@ gphoto2proton sync [flags]
 > *`--username` and `--password` are required only on the **first** run. The
 > authenticated session is saved to `session.json` inside `--state-dir` and
 > reused automatically on later runs — you can then omit both flags.
+> If the account has **2FA (TOTP) enabled**, pass the current code with
+> `--twofa` on the first login.
 >
 > Exactly one of `--takeout-archive` or `--takeout-dir` must be provided.
 
@@ -117,9 +120,12 @@ gphoto2proton albums-finalize [flags]
 | `--state-dir` | `string` | `~/.gphoto2proton/state` | No | Directory with the state database created by `sync` |
 | `--username` | `string` | — | Yes* | Proton account username (email) |
 | `--password` | `string` | — | Yes* | Proton account password |
+| `--twofa` | `string` | — | Only if 2FA* | Proton account TOTP code from your authenticator app (first login only) |
 
 > *Credentials are only needed on the first run (or after clearing the saved
-> session); see [Authentication](authentication.md).
+> session); see [Authentication](authentication.md). If the account has
+> **2FA (TOTP) enabled**, pass the current code with `--twofa` on the first
+> login.
 
 **Example:**
 

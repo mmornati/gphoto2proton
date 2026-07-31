@@ -162,6 +162,7 @@ gphoto2proton version          Print version
 | `--delete-after` | `false` | Delete the archive after successful processing |
 | `--username` | — | Proton username (email) — required on first login |
 | `--password` | — | Proton password — required on first login |
+| `--twofa` | — | Proton TOTP 2FA code — only if the account has 2FA (first login only) |
 | `--resume` | `false` | Skip completed files, retry failed ones |
 | `--state-dir` | `~/.gphoto2proton/state` | SQLite state + saved session location |
 

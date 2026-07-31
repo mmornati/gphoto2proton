@@ -129,4 +129,4 @@ gphoto2proton albums-finalize
 
 - See [Commands](commands.md) for the full CLI reference.
 - See [Authentication](authentication.md) for how login works on headless
-  servers, session reuse, and 2FA notes.
+  servers, session reuse, and 2FA support.

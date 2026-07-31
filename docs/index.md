@@ -30,7 +30,7 @@ with streaming, EXIF restoration, album recreation, and resume safety.
 - [Installation](installation.md) — Install via Homebrew, source, or pre-built binary
 - [Quick Start](quickstart.md) — Get running in 2 minutes
 - [Commands](commands.md) — Full CLI reference
-- [Authentication](authentication.md) — Headless login, sessions, and 2FA notes
+- [Authentication](authentication.md) — Headless login, sessions, and 2FA support
 - [How It Works](how-it-works.md) — Pipeline internals explained
 - [Architecture](architecture.md) — Hexagonal architecture deep dive
 - [Troubleshooting](troubleshooting.md) — Common issues and fixes

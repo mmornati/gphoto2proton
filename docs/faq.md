@@ -49,8 +49,9 @@ gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me -
 ```
 
 The session is saved to `~/.gphoto2proton/state/session.json` and reused
-afterwards, so later runs (and `albums-finalize`) need no credentials. See
-[Authentication](authentication.md) for details, including the 2FA limitation.
+afterwards, so later runs (and `albums-finalize`) need no credentials. If the
+account has **2FA (TOTP) enabled**, add the current code with `--twofa` on the
+first login. See [Authentication](authentication.md) for details.
 
 ---
 

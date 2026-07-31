@@ -161,7 +161,7 @@ func TestSyncHelpShowsNewFlags(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	for _, flag := range []string{"--takeout-archive", "--delete-after"} {
+	for _, flag := range []string{"--takeout-archive", "--delete-after", "--twofa"} {
 		if !strings.Contains(output, flag) {
 			t.Errorf("expected flag %q in help output", flag)
 		}
@@ -176,6 +176,9 @@ func TestAlbumsFinalizeHelp(t *testing.T) {
 	}
 	if !strings.Contains(output, "albums-finalize") {
 		t.Errorf("expected albums-finalize in help output")
+	}
+	if !strings.Contains(output, "--twofa") {
+		t.Errorf("expected --twofa flag in albums-finalize help output")
 	}
 }
 
