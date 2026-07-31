@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,35 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
+
+const (
+	// protonAppVersion is the x-pm-appversion header value sent to Proton.
+	// Proton only accepts third-party clients using the
+	// external-drive-<project>@<semver-version> format where the project name
+	// conforms to (-[a-z_]+)+; any other pattern is rejected with API error
+	// 2064 during the first auth/info request.
+	protonAppVersion = "external-drive-gphoto-proton@0.1.0"
+)
+
+// protonUserAgent returns the User-Agent header value for Proton requests.
+// Proton requires the platform-product format with a dash separating the
+// application platform from the product name.
+func protonUserAgent() string {
+	return fmt.Sprintf("%s-gphoto2proton", protonPlatform())
+}
+
+// protonPlatform maps the runtime GOOS to the platform token Proton accepts
+// (linux, windows, macos, android, ios, web).
+func protonPlatform() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "windows"
+	default:
+		return "linux"
+	}
+}
 
 var mimeTypes = map[string]string{
 	".jpg":  "image/jpeg",
@@ -36,8 +66,8 @@ type Uploader struct {
 
 func NewUploader(ctx context.Context, username, password, twoFA string, credStore *CredentialStore) (port.ProtonUploader, error) {
 	config := common.NewConfigWithDefaultValues()
-	config.AppVersion = "gphoto2proton"
-	config.UserAgent = "gphoto2proton"
+	config.AppVersion = protonAppVersion
+	config.UserAgent = protonUserAgent()
 
 	cred, err := credStore.Load()
 	if err == nil {

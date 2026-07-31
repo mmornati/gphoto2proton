@@ -261,7 +261,7 @@ func (a *AlbumAdapter) doOnce(ctx context.Context, method, path string, body []b
 	req.Header.Set("x-pm-uid", cred.UID)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "gphoto2proton/1.0")
+	req.Header.Set("User-Agent", protonUserAgent())
 
 	resp, err := a.httpClient.Do(req)
 	if err != nil {

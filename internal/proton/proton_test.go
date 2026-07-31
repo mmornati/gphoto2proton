@@ -3,10 +3,37 @@ package proton
 import (
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
+
+func TestProtonAppVersionFormat(t *testing.T) {
+	// Proton only accepts third-party app versions matching the documented
+	// external-drive-<project>@<semver> format where project conforms to
+	// (-[a-z_]+)+; otherwise the auth/info request fails with API error 2064.
+	pattern := regexp.MustCompile(`^external-drive(-[a-z_]+)+@[0-9]+\.[0-9]+\.[0-9]+$`)
+	if !pattern.MatchString(protonAppVersion) {
+		t.Fatalf("protonAppVersion %q does not match external-drive-<project>@<semver> format", protonAppVersion)
+	}
+}
+
+func TestProtonUserAgentFormat(t *testing.T) {
+	// Proton requires the User-Agent to be <platform>-<product> separated
+	// by a dash, otherwise the auth/info request fails with API error 2064.
+	ua := protonUserAgent()
+	if !strings.Contains(ua, "-") {
+		t.Fatalf("user agent %q is missing the required platform-product dash", ua)
+	}
+	if !strings.HasSuffix(ua, "-gphoto2proton") {
+		t.Fatalf("user agent %q must end with -gphoto2proton", ua)
+	}
+	if !strings.HasPrefix(ua, "linux-gphoto2proton") && !strings.HasPrefix(ua, "macos-gphoto2proton") && !strings.HasPrefix(ua, "windows-gphoto2proton") {
+		t.Fatalf("user agent %q has unexpected platform token", ua)
+	}
+}
 
 func TestCompilesProtonUploader(t *testing.T) {
 	t.Skip("Uploader construction requires live Proton credential; covered by AlbumAdapter tests")
