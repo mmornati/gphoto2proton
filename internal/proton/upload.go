@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -13,6 +14,45 @@ import (
 	proton "github.com/henrybear327/go-proton-api"
 	"github.com/mmornati/gphoto2proton/internal/port"
 )
+
+const (
+	// protonAppVersion is the x-pm-appversion header value sent to Proton.
+	// Rules verified live against POST /auth/v4/info (2026-07-31):
+	//
+	//   - must be external-drive-<name>@<semver>[-<channel>]; anything else
+	//     fails with HTTP 400 / API error 2064 ("platform and product must
+	//     be separated by a dash").
+	//   - <name> is a SINGLE section: inner dashes are rejected with 2064
+	//     "Invalid section name" (external-drive-gphoto-proton@... fails).
+	//     Underscores are fine (external-drive-gphoto_proton@... passes).
+	//   - the live server accepts digits in <name> and a bare <semver>, but
+	//     the stricter regex published by a Proton Drive engineer in
+	//     rclone/rclone#9189 does not; we stay in the intersection of both
+	//     (letters+underscores name, explicit -stable channel) to be robust
+	//     against future server-side tightening.
+	protonAppVersion = "external-drive-gphoto_proton@0.1.0-stable"
+)
+
+// protonUserAgent returns the User-Agent header value for Proton requests.
+// Proton does not appear to validate the User-Agent format server-side
+// (rclone sends "rclone/vX.Y.Z" without any dash and works), but we send a
+// <platform>-<product> shaped value to look like a first-party client.
+func protonUserAgent() string {
+	return fmt.Sprintf("%s-gphoto2proton", protonPlatform())
+}
+
+// protonPlatform maps the runtime GOOS to the platform token Proton accepts
+// (linux, windows, macos, android, ios, web).
+func protonPlatform() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "windows"
+	default:
+		return "linux"
+	}
+}
 
 var mimeTypes = map[string]string{
 	".jpg":  "image/jpeg",
@@ -36,8 +76,8 @@ type Uploader struct {
 
 func NewUploader(ctx context.Context, username, password, twoFA string, credStore *CredentialStore) (port.ProtonUploader, error) {
 	config := common.NewConfigWithDefaultValues()
-	config.AppVersion = "gphoto2proton"
-	config.UserAgent = "gphoto2proton"
+	config.AppVersion = protonAppVersion
+	config.UserAgent = protonUserAgent()
 
 	cred, err := credStore.Load()
 	if err == nil {

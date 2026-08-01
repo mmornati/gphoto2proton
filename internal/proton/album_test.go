@@ -72,6 +72,9 @@ func TestAlbumAdapterCreateAlbumHappyPath(t *testing.T) {
 			if uid := r.Header.Get("x-pm-uid"); uid != "uid-123" {
 				t.Errorf("unexpected x-pm-uid: %q", uid)
 			}
+			if av := r.Header.Get("x-pm-appversion"); av != protonAppVersion {
+				t.Errorf("unexpected x-pm-appversion: %q", av)
+			}
 			var body map[string]string
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decoding body: %v", err)
