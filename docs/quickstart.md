@@ -72,6 +72,17 @@ archive, so albums that span multiple archives are accumulated automatically.
     gphoto2proton sync --takeout-dir ~/Takeout/Takeout --username user@proton.me --password 'your-password'
     ```
 
+!!! tip "Already using the proton-drive CLI?"
+    You can skip the username/password login entirely and reuse the session
+    saved by the proton-drive CLI:
+
+    ```bash
+    pass show ch.proton.drive/drive-sdk-cli/auth-session | gphoto2proton import-session
+    ```
+
+    Afterwards run `sync`/`albums-finalize` without any credentials. See
+    [Authentication](authentication.md#importing-the-proton-drive-cli-session).
+
 ---
 
 ## Step 3: Finalize Albums (Optional)
