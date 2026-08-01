@@ -22,6 +22,7 @@ with streaming, EXIF restoration, album recreation, and resume safety.
 | 🖼️ | **Album Recreation** | Rebuilds Google Photos albums inside Proton Photos |
 | 🔁 | **Resume Safety** | SQLite state tracker — interrupt and resume without re-uploading |
 | 🔒 | **On-Device** | Authenticates via Proton SDK; credentials never leave your machine |
+| 🔑 | **proton-drive CLI reuse** | Import an existing proton-drive CLI session — no password or CAPTCHA needed |
 
 ---
 

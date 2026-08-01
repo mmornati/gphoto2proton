@@ -145,6 +145,15 @@ Tokens are maintained by the Proton-API-Bridge SDK and refreshed automatically.
 The file is written with owner-only permissions (`0600`) inside a `0700`
 directory.
 
+The session can also be **imported from a proton-drive CLI login** instead of
+performing a fresh API login — see
+[Authentication → Importing the proton-drive CLI session](
+authentication.md#importing-the-proton-drive-cli-session):
+
+```bash
+gphoto2proton import-session --source auth-session.json
+```
+
 To clear the saved session (and force a fresh login on the next run):
 
 ```bash

@@ -10,6 +10,7 @@
 |---------|-------------|
 | `sync` | Run the migration pipeline against a Takeout archive or directory |
 | `albums-finalize` | Create albums in Proton Photos from accumulated membership data |
+| `import-session` | Import a saved Proton session from the proton-drive CLI |
 | `version` | Print the version number |
 | `help` | Help about any command |
 | `completion` | Generate shell autocompletion scripts |
@@ -50,6 +51,8 @@ gphoto2proton sync [flags]
 > *`--username` and `--password` are required only on the **first** run. The
 > authenticated session is saved to `session.json` inside `--state-dir` and
 > reused automatically on later runs — you can then omit both flags.
+> Alternatively, you can import a session from a proton-drive CLI login with
+> `gphoto2proton import-session` (no password needed).
 > If the account has **2FA (TOTP) enabled**, pass the current code with
 > `--twofa` on the first login.
 >
@@ -125,7 +128,8 @@ gphoto2proton albums-finalize [flags]
 > *Credentials are only needed on the first run (or after clearing the saved
 > session); see [Authentication](authentication.md). If the account has
 > **2FA (TOTP) enabled**, pass the current code with `--twofa` on the first
-> login.
+> login. If a saved session already exists in `--state-dir` (e.g. imported
+> with `import-session`), `--username`/`--password` can be omitted.
 
 **Example:**
 
@@ -135,6 +139,50 @@ gphoto2proton albums-finalize --username user@proton.me --password 'secret'
 
 Albums that cannot be resolved (no matching uploaded file) are skipped with a
 warning; the command never fails the whole run for a single album.
+
+---
+
+## gphoto2proton import-session
+
+Import a Proton session saved by the [proton-drive CLI](
+https://github.com/ProtonMail/proton-drive-cli) so that `sync` and
+`albums-finalize` can authenticate **without** `--username`/`--password`.
+
+The proton-drive CLI stores its session in the `pass` store on the machine
+where you logged in. Dump it and pipe it into `import-session`:
+
+```bash
+# On the proton-drive host, pipe straight into the remote gphoto2proton:
+pass show ch.proton.drive/drive-sdk-cli/auth-session | \
+  ssh user@server 'gphoto2proton import-session --state-dir ~/.gphoto2proton/state'
+
+# Or locally, from a JSON file:
+gphoto2proton import-session --source auth-session.json
+```
+
+**Usage:**
+
+```bash
+gphoto2proton import-session [flags]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Required | Description |
+|------|------|---------|----------|-------------|
+| `--state-dir` | `string` | `~/.gphoto2proton/state` | No | Directory where `session.json` will be written |
+| `--source` | `string` | stdin | No | Path to a proton-drive `auth-session` JSON file (defaults to stdin) |
+
+**Example output:**
+
+```
+imported Proton session (uid=46kk...) to /home/user/.gphoto2proton/state/session.json
+```
+
+The session JSON must contain a `session` object with `uid`, `accessToken` and
+`refreshToken`, plus the `userKeyPassword` field (used as the salted key pass).
+See [Authentication → Importing the proton-drive CLI session](
+authentication.md#importing-the-proton-drive-cli-session) for details.
 
 ---
 

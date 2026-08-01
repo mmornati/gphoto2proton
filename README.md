@@ -33,7 +33,7 @@ behind.
 | 🖼️ | **Album Recreation** | Rebuilds your Google Photos albums inside Proton Photos automatically, even across archives |
 | 🔁 | **Resume Safety** | SQLite-backed state tracker — interrupt and resume without re-uploading |
 | 🔒 | **Headless Auth** | Authenticates via the Proton API (no OAuth2, no browser); credentials never leave your machine |
-
+| 🔑 | **proton-drive CLI reuse** | Import an existing proton-drive CLI session — no password or CAPTCHA needed |
 ---
 
 ## Quick Start
@@ -76,6 +76,14 @@ go build -o gphoto2proton ./cmd/gphoto2proton
 Credentials are only needed on the first run — the session is saved to
 `~/.gphoto2proton/state/session.json` and reused afterwards. See
 [docs/authentication.md](docs/authentication.md) for headless-server details.
+
+Already logged into the **proton-drive CLI**? Reuse that session — no password
+needed:
+
+```bash
+pass show ch.proton.drive/drive-sdk-cli/auth-session | gphoto2proton import-session
+gphoto2proton sync --takeout-archive takeout-001.tgz
+```
 
 ### Download pre-built binary
 
@@ -150,6 +158,7 @@ with mocks and straightforward to extend.
 ```
 gphoto2proton sync             Run the migration pipeline (archive or directory)
 gphoto2proton albums-finalize  Create accumulated albums in Proton Photos
+gphoto2proton import-session   Reuse a session from the proton-drive CLI (no password)
 gphoto2proton version          Print version
 ```
 

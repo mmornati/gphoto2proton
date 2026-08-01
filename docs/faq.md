@@ -51,7 +51,19 @@ gphoto2proton sync --takeout-archive takeout-001.tgz --username user@proton.me -
 The session is saved to `~/.gphoto2proton/state/session.json` and reused
 afterwards, so later runs (and `albums-finalize`) need no credentials. If the
 account has **2FA (TOTP) enabled**, add the current code with `--twofa` on the
-first login. See [Authentication](authentication.md) for details.
+first login.
+
+**Already use the proton-drive CLI?** You can skip the API login entirely and
+import its saved session — ideal on servers where a fresh login might be
+CAPTCHA-gated:
+
+```bash
+pass show ch.proton.drive/drive-sdk-cli/auth-session | \
+  ssh user@server 'gphoto2proton import-session'
+gphoto2proton sync --takeout-archive takeout-001.tgz
+```
+
+See [Authentication](authentication.md) for details.
 
 ---
 

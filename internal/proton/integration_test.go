@@ -80,6 +80,66 @@ func TestIntegrationAuthHeaders(t *testing.T) {
 	t.Logf("login OK with app-version %q, user-agent %q", protonAppVersion, protonUserAgent())
 }
 
+// TestIntegrationImportedSessionReadOnly imports a proton-drive session file
+// (JS SDK format, e.g. from `pass show ch.proton.drive/drive-sdk-cli/auth-session`)
+// and verifies it authenticates against the live API using strictly read-only
+// operations (About + listing the root folder). Nothing is created, modified
+// or deleted on the drive.
+//
+//	PROTON_DRIVE_SESSION=/path/to/auth-session.json
+func TestIntegrationImportedSessionReadOnly(t *testing.T) {
+	ctx, _ := integrationSetup(t)
+
+	src := os.Getenv("PROTON_DRIVE_SESSION")
+	if src == "" {
+		t.Skip("PROTON_DRIVE_SESSION (path to proton-drive auth-session JSON) not set")
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		t.Fatalf("opening session file: %v", err)
+	}
+	defer f.Close()
+
+	stateDir := os.Getenv("PROTON_STATE_DIR")
+	if stateDir == "" {
+		stateDir = t.TempDir()
+	}
+	store := NewCredentialStore(stateDir)
+
+	cred, err := LoadProtonDriveSession(f)
+	if err != nil {
+		t.Fatalf("LoadProtonDriveSession: %v", err)
+	}
+	if err := store.Save(cred); err != nil {
+		t.Fatalf("saving imported session: %v", err)
+	}
+
+	up, err := NewUploader(ctx, "", "", "", store)
+	if err != nil {
+		t.Fatalf("NewUploader with imported session failed (app-version %q): %v", protonAppVersion, err)
+	}
+	u, ok := up.(*Uploader)
+	if !ok {
+		t.Fatalf("expected *Uploader, got %T", up)
+	}
+
+	about, err := u.drive.About(ctx)
+	if err != nil {
+		t.Fatalf("About (read-only) failed with imported session: %v", err)
+	}
+	t.Logf("About OK: user=%s usedSpace=%d", about.Name, about.UsedSpace)
+
+	entries, err := u.drive.ListDirectory(ctx, u.drive.RootLink.LinkID)
+	if err != nil {
+		t.Fatalf("ListDirectory (read-only) failed with imported session: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name)
+	}
+	t.Logf("root folder has %d entries: %v", len(entries), names)
+}
+
 // TestIntegrationAlbumRoundTrip creates and deletes an album via the live
 // Proton Photos API, verifying that photos-api.proton.me accepts the
 // request headers (Authorization, x-pm-uid, x-pm-appversion, User-Agent).

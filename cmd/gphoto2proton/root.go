@@ -22,6 +22,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -106,8 +107,17 @@ to Proton Drive with streaming, EXIF restoration, album recreation, and resume s
 					return fmt.Errorf("creating uploader: %w", err)
 				}
 				uploader = up
+			} else if _, err := proton.NewCredentialStore(stateDir).Load(); err == nil {
+				// A saved session exists (e.g. imported via import-session or
+				// left by a previous authenticated run) — reuse it without
+				// requiring credentials again.
+				up, err := proton.NewUploader(cmd.Context(), "", "", "", proton.NewCredentialStore(stateDir))
+				if err != nil {
+					return fmt.Errorf("creating uploader from saved session: %w", err)
+				}
+				uploader = up
 			} else {
-				slog.Warn("--username/--password not set, upload disabled")
+				slog.Warn("--username/--password not set and no saved session found, upload disabled")
 			}
 
 			p := &Pipeline{
@@ -155,7 +165,9 @@ This should be run after all archives have been processed.`,
 			twoFA, _ := cmd.Flags().GetString("twofa")
 
 			if username == "" || password == "" {
-				return fmt.Errorf("--username and --password are required for albums-finalize")
+				if _, err := proton.NewCredentialStore(stateDir).Load(); err != nil {
+					return fmt.Errorf("--username and --password are required for albums-finalize unless a saved session exists in %s", stateDir)
+				}
 			}
 
 			dbPath := filepath.Join(stateDir, "state.db")
@@ -225,6 +237,50 @@ This should be run after all archives have been processed.`,
 	albumsFinalize.Flags().String("password", "", "Proton account password")
 	albumsFinalize.Flags().String("twofa", "", "Proton account TOTP 2FA code (only needed on first login)")
 
+	importSession := &cobra.Command{
+		Use:   "import-session",
+		Short: "Import a saved Proton session from the proton-drive CLI",
+		Long: `Read a Proton session file produced by the proton-drive CLI (JS SDK
+format) and store it as the reusable session used by sync and albums-finalize,
+so no password or 2FA is required on subsequent runs.
+
+The session can be dumped on the proton-drive host with:
+
+	pass show ch.proton.drive/drive-sdk-cli/auth-session
+
+and passed either via --source or on stdin.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			stateDir, _ := cmd.Flags().GetString("state-dir")
+			source, _ := cmd.Flags().GetString("source")
+
+			var r io.Reader = cmd.InOrStdin()
+			if source != "" {
+				f, err := os.Open(source)
+				if err != nil {
+					return fmt.Errorf("opening source file: %w", err)
+				}
+				defer f.Close()
+				r = f
+			}
+
+			cred, err := proton.LoadProtonDriveSession(r)
+			if err != nil {
+				return err
+			}
+
+			store := proton.NewCredentialStore(stateDir)
+			if err := store.Save(cred); err != nil {
+				return fmt.Errorf("saving imported session: %w", err)
+			}
+
+			fmt.Fprintf(os.Stderr, "imported Proton session (uid=%s) to %s\n",
+				cred.UID, filepath.Join(stateDir, "session.json"))
+			return nil
+		},
+	}
+	importSession.Flags().String("state-dir", defaultStateDir, "Directory for SQLite state database")
+	importSession.Flags().String("source", "", "Path to a proton-drive auth-session JSON file (defaults to stdin)")
+
 	version := &cobra.Command{
 		Use:   "version",
 		Short: "Print the version number",
@@ -235,6 +291,7 @@ This should be run after all archives have been processed.`,
 
 	root.AddCommand(sync)
 	root.AddCommand(albumsFinalize)
+	root.AddCommand(importSession)
 	root.AddCommand(version)
 	return root
 }

@@ -98,6 +98,8 @@ The uploader:
 
 - Authenticates directly with the Proton API (SRP login) — no OAuth2, no
   browser, fully headless
+- Alternatively reuses an existing session imported from the proton-drive CLI
+  via `gphoto2proton import-session` — no password or CAPTCHA needed
 - Detects MIME type from file extension
 - Streams the photo data directly — no temp file on disk
 - Saves the authenticated session for reuse on later runs
