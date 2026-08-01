@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/henrybear327/Proton-API-Bridge"
-	"github.com/henrybear327/Proton-API-Bridge/common"
-	proton "github.com/henrybear327/go-proton-api"
 	"github.com/mmornati/gphoto2proton/internal/port"
+	"github.com/rclone/Proton-API-Bridge"
+	"github.com/rclone/Proton-API-Bridge/common"
+	proton "github.com/rclone/go-proton-api"
 )
 
 const (
