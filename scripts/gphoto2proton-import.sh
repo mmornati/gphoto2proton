@@ -86,6 +86,29 @@ strip_junk() {
 is_done() { grep -qxF "$1" "$DONE_FILE" 2>/dev/null; }
 mark_done() { echo "$1" >> "$DONE_FILE"; }
 
+# Apply capture dates from Google Photos sidecar JSON (<file>.<ext>.json).
+# Images: CLI reads EXIF natively (correct by default).
+# Videos: CLI falls back to filesystem mtime (which is the archive creation time).
+# We read the original photoTakenTime.timestamp from the sidecar and set mtime
+# via touch -t, so the CLI picks up the correct capture date for videos too.
+apply_sidecar_dates() {
+  local gp_dir="$1"
+  local f sidecar epoch formatted count=0
+  while IFS= read -r -d '' f; do
+    is_media "$f" || continue
+    sidecar="${f}.json"
+    [[ -f "$sidecar" ]] || continue
+    epoch=$(jq -r '.photoTakenTime.timestamp // empty' "$sidecar" 2>/dev/null || true)
+    [[ -n "$epoch" ]] || continue
+    if formatted=$(date -d "@$epoch" '+%Y%m%d%H%M.%S' 2>/dev/null); then
+      if touch -t "$formatted" "$f" 2>/dev/null; then
+        count=$((count + 1))
+      fi
+    fi
+  done < <(find "$gp_dir" -type f -print0)
+  log "applied capture dates from sidecar JSON to $count files"
+}
+
 # ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
@@ -487,6 +510,9 @@ run_archive() {
   log "stripping macOS metadata junk (._*, .DS_Store) ..."
   strip_junk "$extract_dir"
 
+  log "applying original capture dates from sidecar JSON ..."
+  apply_sidecar_dates "$gp_dir"
+
   # Empty-archive check: bail early if no media files anywhere.
   local any_media
   any_media=$(find "$gp_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 2>/dev/null | head -c 1)
@@ -500,8 +526,12 @@ run_archive() {
 
   # Manifest: sha1sum of every media file in the whole Google Photos tree.
   local manifest_tsv="$artifacts/manifest.tsv" manifest_json="$artifacts/manifest.json"
-  log "building manifest (sha1sum of all media files) ..."
-  build_manifest "$gp_dir" "$manifest_tsv" "$manifest_json" "$gp_dir"
+  if [[ -f "$manifest_json" ]]; then
+    log "reusing cached manifest ($(jq '.media_count' "$manifest_json") files)"
+  else
+    log "building manifest (sha1sum of all media files) ..."
+    build_manifest "$gp_dir" "$manifest_tsv" "$manifest_json" "$gp_dir"
+  fi
   local expected_media expected_unique
   expected_media=$(jq '.media_count' "$manifest_json")
   expected_unique=$(jq '[.media[] | .sha1] | unique | length' "$manifest_json")
