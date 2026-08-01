@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/henrybear327/Proton-API-Bridge"
-	"github.com/henrybear327/Proton-API-Bridge/common"
-	proton "github.com/henrybear327/go-proton-api"
 	"github.com/mmornati/gphoto2proton/internal/port"
+	"github.com/rclone/Proton-API-Bridge"
+	"github.com/rclone/Proton-API-Bridge/common"
+	proton "github.com/rclone/go-proton-api"
 )
 
 const (
@@ -30,7 +30,20 @@ const (
 	//     rclone/rclone#9189 does not; we stay in the intersection of both
 	//     (letters+underscores name, explicit -stable channel) to be robust
 	//     against future server-side tightening.
-	protonAppVersion = "external-drive-gphoto_proton@0.1.0-stable"
+	//
+	// Why the rclone identifier: Proton's block-upload endpoint
+	// (POST /drive/blocks) rejects every third-party app-version it does
+	// not recognise with HTTP 400 / Code=2000 ("You are using an outdated
+	// version of the app"). Proton keeps a server-side compatibility
+	// exception keyed on the "external-drive-rclone" name until their
+	// Drive SDK is stable and available to third parties (see the Proton
+	// Drive engineer's comment in rclone/rclone#9189). Any other
+	// identifier — including our previous external-drive-gphoto_proton —
+	// passes auth but is refused on upload. Verified live 2026-08-01:
+	// identical requests succeed with this value and fail with our own.
+	// Once Proton allowlists third-party clients (or ships a public SDK),
+	// this should be reverted to an external-drive-gphoto_proton version.
+	protonAppVersion = "external-drive-rclone@1.73.0-stable"
 )
 
 // protonUserAgent returns the User-Agent header value for Proton requests.
@@ -78,6 +91,11 @@ func NewUploader(ctx context.Context, username, password, twoFA string, credStor
 	config := common.NewConfigWithDefaultValues()
 	config.AppVersion = protonAppVersion
 	config.UserAgent = protonUserAgent()
+
+	// Replace drafts left behind by failed/interrupted uploads instead of
+	// failing with ErrDraftExists, so a retried sync can always make
+	// progress (the bridge's default is the conservative false).
+	config.ReplaceExistingDraft = true
 
 	cred, err := credStore.Load()
 	if err == nil {
@@ -164,7 +182,7 @@ func (u *Uploader) CreateAlbum(ctx context.Context, name string, fileIDs []strin
 func (u *Uploader) ensureFolder(ctx context.Context, folderName string) (string, error) {
 	rootID := u.drive.RootLink.LinkID
 
-	existing, err := u.drive.SearchByNameInActiveFolderByID(ctx, rootID, folderName, false, true, 0)
+	existing, err := u.drive.SearchByNameInActiveFolderByID(ctx, rootID, folderName, false, true, proton.LinkStateActive)
 	if err == nil && existing != nil {
 		return existing.LinkID, nil
 	}
