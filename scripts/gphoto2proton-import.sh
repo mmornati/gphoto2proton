@@ -462,9 +462,9 @@ run_archive() {
 
   gp_dir=$(find "$extract_dir" -type d -name "Google Photos" | head -1)
   if [[ -z "$gp_dir" ]]; then
-    local any_files
-    any_files=$(find "$extract_dir" -type f -size +0 -print0 2>/dev/null | xargs -0 -I {} echo 1 | head -c 1)
-    if [[ -z "$any_files" ]]; then
+    local any_media
+    any_media=$(find "$extract_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 | head -c 1)
+    if [[ -z "$any_media" ]]; then
       log "no 'Google Photos' directory and no files — treating as empty archive"
       jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, albums_processed: 0 }' > "$artifacts/summary.json"
       rm -rf "$extract_dir"
