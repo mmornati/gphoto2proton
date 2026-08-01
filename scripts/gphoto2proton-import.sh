@@ -96,7 +96,7 @@ apply_sidecar_dates() {
   local f sidecar epoch formatted count=0
   while IFS= read -r -d '' f; do
     is_media "$f" || continue
-    sidecar="${f}.json"
+    sidecar="${f}.supplemental-metadata.json"
     [[ -f "$sidecar" ]] || continue
     epoch=$(jq -r '.photoTakenTime.timestamp // empty' "$sidecar" 2>/dev/null || true)
     [[ -n "$epoch" ]] || continue
