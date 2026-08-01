@@ -166,7 +166,7 @@ build_manifest() {
   shift 3
   local -a dirs=("$@")
   : > "$tsv"
-  local d f rel sha size count=0
+  local d f rel sha size count=0 throttle=0
   for d in "${dirs[@]}"; do
     while IFS= read -r -d '' f; do
       is_media "$f" || continue
@@ -176,9 +176,14 @@ build_manifest() {
       size=$(stat -c%s "$f")
       printf '%s\t%s\t%s\n' "$sha" "$size" "$rel" >> "$tsv"
       count=$((count + 1))
+      throttle=$((throttle + 1))
+      if (( throttle >= 500 )); then
+        log "  sha1sum progress: $count files hashed"
+        throttle=0
+      fi
     done < <(find "$d" -type f -print0)
   done
-
+  log "  sha1sum complete: $count files"
   jq -Rsr --argjson count "$count" '
     split("\n") | map(select(length > 0)) | map(split("\t")) |
     { media_count: $count,
@@ -450,32 +455,37 @@ run_archive() {
   log "==== $base ($index/$total) ===="
 
   extract_dir="$WORK_DIR/$base"
-  rm -rf "$extract_dir"
-  mkdir -p "$extract_dir"
-  log "extracting $archive ..."
-  if ! tar xzf "$archive" -C "$extract_dir" > "$artifacts/tar.out" 2>&1; then
-    err "tar extraction failed (see $artifacts/tar.out)"; rm -rf "$extract_dir"; return 1
+  gp_dir=$(find "$extract_dir" -type d -name "Google Photos" 2>/dev/null | head -1)
+  if [[ -d "$extract_dir" ]] && [[ -n "$gp_dir" ]]; then
+    log "extraction exists, resuming ..."
+  else
+    rm -rf "$extract_dir"
+    mkdir -p "$extract_dir"
+    log "extracting $archive ..."
+    if ! tar xzf "$archive" -C "$extract_dir" > "$artifacts/tar.out" 2>&1; then
+      err "tar extraction failed (see $artifacts/tar.out)"; rm -rf "$extract_dir"; return 1
+    fi
+
+    gp_dir=$(find "$extract_dir" -type d -name "Google Photos" | head -1)
+    if [[ -z "$gp_dir" ]]; then
+      local any_media
+      any_media=$(find "$extract_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 | head -c 1)
+      if [[ -z "$any_media" ]]; then
+        log "no 'Google Photos' directory and no media files — treating as empty archive"
+        jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, albums_processed: 0 }' > "$artifacts/summary.json"
+        rm -rf "$extract_dir"
+        mark_done "$base"
+        return 0
+      else
+        err "no 'Google Photos' directory found in $base (but other files exist — unexpected structure)"
+        rm -rf "$extract_dir"
+        return 1
+      fi
+    fi
   fi
 
   log "stripping macOS metadata junk (._*, .DS_Store) ..."
   strip_junk "$extract_dir"
-
-  gp_dir=$(find "$extract_dir" -type d -name "Google Photos" | head -1)
-  if [[ -z "$gp_dir" ]]; then
-    local any_media
-    any_media=$(find "$extract_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 | head -c 1)
-    if [[ -z "$any_media" ]]; then
-      log "no 'Google Photos' directory and no files — treating as empty archive"
-      jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, albums_processed: 0 }' > "$artifacts/summary.json"
-      rm -rf "$extract_dir"
-      mark_done "$base"
-      return 0
-    else
-      err "no 'Google Photos' directory found in $base (but other files exist — unexpected structure)"
-      rm -rf "$extract_dir"
-      return 1
-    fi
-  fi
 
   # Empty-archive check: bail early if no media files anywhere.
   local any_media
