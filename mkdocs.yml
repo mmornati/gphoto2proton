@@ -28,6 +28,11 @@ nav:
   - Commands: commands.md
   - Configuration: configuration.md
   - Authentication: authentication.md
+  - Scripts / Proton Drive CLI:
+      - Overview: scripts/overview.md
+      - Quick Start: scripts/quickstart.md
+      - Import Script: scripts/import.md
+      - Fix Photo Date: scripts/fix-photo-date.md
   - How It Works: how-it-works.md
   - Architecture: architecture.md
   - Troubleshooting: troubleshooting.md
