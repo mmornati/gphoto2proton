@@ -19,7 +19,8 @@
 #
 # Usage:
 #   gphoto2proton-import.sh [--check] [--force] [--keep-work] [--resume]
-#                           [--albums-only] [--archive NAME]
+#                           [--albums-only] [--convert-raw]
+#                           [--reprocess-recovery] [--archive NAME]
 #
 # Env vars (defaults shown):
 #   CLI                            proton-drive
@@ -44,9 +45,14 @@ RUN_TS=""
 RUN_LOG=""
 DONE_FILE="$STATE_DIR/done"
 RECOVERY_FILE="$STATE_DIR/recovery.tsv"
+RAW_CONVERSIONS_FILE="$STATE_DIR/raw-conversions.tsv"
 KEEP_WORK=0
 RESUME=0
 ALBUMS_ONLY=0
+CONVERT_RAW=0
+REPROCESS_RECOVERY=0
+RECOVERY_FILTER=""
+RAW_CONVERTER=""
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN_LOG" >&2; }
 err() { echo "[$(date +%H:%M:%S)] ERROR: $*" | tee -a "$RUN_LOG" >&2; }
@@ -65,6 +71,13 @@ Options:
   --resume         Skip upload/verify if artifacts from a previous run exist.
   --albums-only    Only recreate albums from already-uploaded photos
                    (also reprocesses archives already marked as done).
+  --convert-raw    Convert unsupported RAW formats (NEF/CR2/ARW) to JPEG
+                   before upload, so they can be ingested by Proton Photos.
+                   Uses darktable-cli, or dcraw + ImageMagick convert.
+  --reprocess-recovery
+                   Re-process the files recorded in recovery.tsv: re-extract
+                   the archive, convert RAW -> JPEG, upload, add them to
+                   albums and clear the resolved entries. Implies --convert-raw.
   --archive NAME   Process only the given archive (basename or path).
   -h, --help       Show this help.
 EOF
@@ -75,6 +88,101 @@ is_media() {
     jpg|jpeg|png|gif|heic|mov|mp4|cr2|nef|arw|JPG|JPEG|PNG|GIF|HEIC|MOV|MP4|CR2|NEF|ARW) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# RAW camera formats that the proton-drive CLI cannot ingest into Photos.
+is_raw() {
+  case "${1##*.}" in
+    nef|cr2|arw|NEF|CR2|ARW) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Detect the best available RAW -> JPEG converter.
+# Priority: darktable-cli (direct JPEG, preserves EXIF) > dcraw+convert.
+detect_raw_converter() {
+  if command -v darktable-cli >/dev/null 2>&1; then
+    echo "darktable-cli"
+  elif command -v dcraw >/dev/null 2>&1 && command -v convert >/dev/null 2>&1; then
+    echo "dcraw+convert"
+  fi
+}
+
+# Convert a single RAW file to JPEG using the detected converter.
+convert_one_raw() {
+  local src="$1" dst="$2" converter="$3" artifacts="$4"
+  case "$converter" in
+    darktable-cli)
+      darktable-cli "$src" "$dst" >/dev/null 2>"$artifacts/raw-convert.err"
+      ;;
+    dcraw+convert)
+      dcraw -c "$src" 2>"$artifacts/raw-convert.err" | convert - "$dst"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# Convert RAW files (NEF/CR2/ARW) to JPEG in place, so the rest of the pipeline
+# (manifest, upload, albums) only ever sees supported media. When RECOVERY_FILTER
+# is set, only the RAW files listed there (a recovery.tsv relpath per line) are
+# converted. Every conversion is logged to the global raw-conversions.tsv and to
+# the per-archive artifact log.
+convert_raw_files() {
+  local gp_dir="$1" artifacts="$2" archive_name="$3"
+  local converter="$RAW_CONVERTER"
+  if [[ -z "$converter" ]]; then
+    log "  no RAW converter available — skipping RAW conversion (files will land in recovery.tsv)"
+    return 0
+  fi
+  local conv_log="$artifacts/raw-conversions.tsv"
+  : > "$conv_log"
+  : > "$artifacts/raw-conversion-failed.tsv"
+  local count=0 fail=0 f rel base dir out new_rel n=0
+  local orig_sha orig_size new_sha new_size
+  while IFS= read -r -d '' f; do
+    is_raw "$f" || continue
+    is_junk "$f" && continue
+    rel="${f#"$gp_dir"/}"
+    if [[ -n "$RECOVERY_FILTER" ]] && ! grep -qxF "$rel" "$RECOVERY_FILTER"; then
+      continue
+    fi
+    dir=$(dirname "$f")
+    base=$(basename "$f")
+    out="$dir/${base%.*}.jpg"
+    n=0
+    while [[ -e "$out" ]]; do
+      n=$((n + 1))
+      out="$dir/${base%.*}-converted-$n.jpg"
+    done
+    new_rel="${out#"$gp_dir"/}"
+    orig_sha=$(sha1sum "$f" | awk '{print $1}')
+    orig_size=$(stat -c%s "$f")
+    if ! convert_one_raw "$f" "$out" "$converter" "$artifacts" || [[ ! -s "$out" ]]; then
+      err "  RAW conversion FAILED: $rel (see $artifacts/raw-convert.err) — left as-is"
+      printf '%s\t%s\t%s\t%s\tmissing_from_timeline\n' "$orig_sha" "$orig_size" "$archive_name" "$rel" >> "$artifacts/raw-conversion-failed.tsv"
+      fail=$((fail + 1))
+      continue
+    fi
+    # dcraw outputs PPM with no EXIF; copy metadata from the RAW if exiftool exists
+    # (darktable-cli already embeds EXIF).
+    if [[ "$converter" == "dcraw+convert" ]] && command -v exiftool >/dev/null 2>&1; then
+      exiftool -q -overwrite_original "-TagsFromFile" "$f" "$out" >/dev/null 2>"$artifacts/raw-exif.err" || true
+    fi
+    rm -f "$f"
+    new_sha=$(sha1sum "$out" | awk '{print $1}')
+    new_size=$(stat -c%s "$out")
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$archive_name" "$converter" "$rel" "$new_rel" "$orig_size" "$new_size" "$orig_sha" "$new_sha" >> "$RAW_CONVERSIONS_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$converter" "$rel" "$new_rel" "$orig_size" "$new_size" "$orig_sha" "$new_sha" >> "$conv_log"
+    count=$((count + 1))
+  done < <(find "$gp_dir" -type f -print0)
+  if (( fail > 0 )); then
+    log "  RAW conversion: $count converted, $fail failed — failed files remain in recovery.tsv"
+  else
+    log "  RAW conversion: $count files converted to JPEG ($converter)"
+  fi
+  return 0
 }
 
 # Skip macOS metadata junk (AppleDouble resource forks, .DS_Store) that a
@@ -214,6 +322,38 @@ build_manifest() {
     done < <(find "$d" -type f -print0)
   done
   log "  sha1sum complete: $count files"
+  jq -Rsr --argjson count "$count" '
+    split("\n") | map(select(length > 0)) | map(split("\t")) |
+    { media_count: $count,
+      media: map({ sha1: .[0], size: (.[1] | tonumber), relpath: .[2] }) }
+  ' "$tsv" > "$json"
+}
+
+# ---------------------------------------------------------------------------
+# Recovery manifest: index only the files listed in a recovery filter
+# (one relpath per line). RAW entries are resolved to their converted .jpg
+# counterpart when present.
+# ---------------------------------------------------------------------------
+build_recovery_manifest() {
+  local gp_dir="$1" filter_file="$2" tsv="$3" json="$4"
+  : > "$tsv"
+  local rel out sha size count=0
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    out="$gp_dir/$rel"
+    if is_raw "$rel" && [[ -f "$gp_dir/${rel%.*}.jpg" ]]; then
+      out="$gp_dir/${rel%.*}.jpg"
+    fi
+    if [[ ! -f "$out" ]]; then
+      log "  WARN: recovery file not found in extraction: $rel"
+      continue
+    fi
+    sha=$(sha1sum "$out" | awk '{print $1}')
+    size=$(stat -c%s "$out")
+    printf '%s\t%s\t%s\n' "$sha" "$size" "${out#"$gp_dir"/}" >> "$tsv"
+    count=$((count + 1))
+  done < "$filter_file"
+  log "  recovery manifest: $count files"
   jq -Rsr --argjson count "$count" '
     split("\n") | map(select(length > 0)) | map(split("\t")) |
     { media_count: $count,
@@ -525,10 +665,17 @@ run_archive() {
   log "stripping macOS metadata junk (._*, .DS_Store) ..."
   strip_junk "$extract_dir"
 
-  # Sidecar dates only matter for upload (CLI reads mtime); skip in albums-only.
-  if (( ALBUMS_ONLY == 0 )); then
+  # Sidecar dates only matter for upload (CLI reads mtime); skip in albums-only
+  # and recovery modes (recovery re-processes already-dated files).
+  if (( ALBUMS_ONLY == 0 )) && (( REPROCESS_RECOVERY == 0 )); then
     log "applying original capture dates from sidecar JSON ..."
     apply_sidecar_dates "$gp_dir"
+  fi
+
+  # RAW conversion: turn unsupported NEF/CR2/ARW into JPEG before the manifest
+  # is built, so they flow through upload/albums like any other photo.
+  if (( CONVERT_RAW )) && [[ -n "$RAW_CONVERTER" ]]; then
+    convert_raw_files "$gp_dir" "$artifacts" "$base"
   fi
 
   # Empty-archive check: bail early if no media files anywhere.
@@ -542,9 +689,12 @@ run_archive() {
     return 0
   fi
 
-  # Manifest: sha1sum of every media file in the whole Google Photos tree.
+  # Manifest: sha1sum of every media file in the whole Google Photos tree, or
+  # (recovery mode) only of the files listed in the recovery filter.
   local manifest_tsv="$artifacts/manifest.tsv" manifest_json="$artifacts/manifest.json"
-  if [[ -f "$manifest_json" ]]; then
+  if (( REPROCESS_RECOVERY )); then
+    build_recovery_manifest "$gp_dir" "$RECOVERY_FILTER" "$manifest_tsv" "$manifest_json"
+  elif [[ -f "$manifest_json" ]]; then
     log "reusing cached manifest ($(jq '.media_count' "$manifest_json") files)"
   else
     log "building manifest (sha1sum of all media files) ..."
@@ -585,6 +735,31 @@ run_archive() {
     [[ -z "$prev_artifacts" ]] && log "resume requested but no complete previous artifacts found — full upload"
   fi
 
+  # Recovery mode: stage only the recovered files so the upload/verify pass does
+  # not re-hash the whole archive (already-uploaded photos stay untouched).
+  local upload_dir="$gp_dir"
+  if (( REPROCESS_RECOVERY )); then
+    upload_dir="$WORK_DIR/.recovery-upload.$$"
+    mkdir -p "$upload_dir"
+    local staged=0 rel src
+    while IFS= read -r rel; do
+      [[ -n "$rel" ]] || continue
+      src="$gp_dir/$rel"
+      if is_raw "$rel" && [[ -f "$gp_dir/${rel%.*}.jpg" ]]; then
+        src="$gp_dir/${rel%.*}.jpg"
+      fi
+      [[ -f "$src" ]] || { log "  WARN: recovery file not found: $rel"; continue; }
+      cp -p "$src" "$upload_dir/"
+      staged=$((staged + 1))
+    done < "$RECOVERY_FILTER"
+    log "recovery: staged $staged file(s) for upload"
+    if (( staged == 0 )); then
+      err "no recoverable files staged — aborting recovery for this archive"
+      rm -rf "$upload_dir"
+      return 1
+    fi
+  fi
+
   if (( ALBUMS_ONLY )); then
     run_mode="albums-only"
     log "albums-only mode: skipping upload/verify"
@@ -599,7 +774,7 @@ run_archive() {
     fi
     log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
 
-  elif [[ -n "$prev_artifacts" ]]; then
+  elif [[ -n "$prev_artifacts" ]] && (( REPROCESS_RECOVERY == 0 )); then
     run_mode="resume"
     log "resume mode: reusing upload + timeline artifacts from $prev_artifacts"
     upload_json="$prev_artifacts/upload.json"
@@ -614,8 +789,11 @@ run_archive() {
     fi
 
   else
+    if (( REPROCESS_RECOVERY )); then
+      run_mode="recovery"
+    fi
     log "uploading (conflict strategy: skip) ..."
-    "$CLI" photo upload --json -c skip "$gp_dir" > "$upload_json" 2>"$artifacts/upload.err"; rc=$?
+    "$CLI" photo upload --json -c skip "$upload_dir" > "$upload_json" 2>"$artifacts/upload.err"; rc=$?
     if (( rc != 0 )); then
       err "photo upload failed (rc=$rc) — see $artifacts/upload.err"; return 1
     fi
@@ -629,7 +807,7 @@ run_archive() {
     fi
 
     # Verify: re-run upload, everything already present.
-    "$CLI" photo upload --json -c skip "$gp_dir" > "$verify_json" 2>"$artifacts/upload-verify.err"; rc=$?
+    "$CLI" photo upload --json -c skip "$upload_dir" > "$verify_json" 2>"$artifacts/upload-verify.err"; rc=$?
     if (( rc != 0 )); then
       err "verification upload failed (rc=$rc)"; return 1
     fi
@@ -643,6 +821,11 @@ run_archive() {
     fi
     if (( v_transferred > 0 )); then
       log "WARN: verify upload transferred $v_transferred (content dedup mismatch) — sha1 validation is authoritative"
+    fi
+
+    # Recovery: the staged dir is no longer needed once the timeline is verified.
+    if (( REPROCESS_RECOVERY )); then
+      rm -rf "$upload_dir"
     fi
 
     # Timeline index (sha1 -> uid, name -> uid).
@@ -672,7 +855,14 @@ run_archive() {
   fi
 
   # Validation 1: every media file present in the timeline (non-fatal).
-  validate_media "$manifest_json" "$timeline_base" "$artifacts" "$RECOVERY_FILE" "$base"
+  # In recovery mode, write to a run-local file and reconcile with the global
+  # recovery.tsv on success (see reconcile_recovery).
+  local rec_target="$RECOVERY_FILE"
+  if (( REPROCESS_RECOVERY )); then
+    rec_target="$artifacts/recovery-run.tsv"
+    : > "$rec_target"
+  fi
+  validate_media "$manifest_json" "$timeline_base" "$artifacts" "$rec_target" "$base"
   local media_missing=0
   [[ -f "$artifacts/validation-missing.tsv" ]] && media_missing=$(wc -l < "$artifacts/validation-missing.tsv")
 
@@ -687,6 +877,8 @@ run_archive() {
   album_failures=${album_failures:-0}
 
   # Summary + state + cleanup.
+  local raw_converted=0
+  [[ -f "$artifacts/raw-conversions.tsv" ]] && raw_converted=$(wc -l < "$artifacts/raw-conversions.tsv")
   local summary="$artifacts/summary.json"
   jq -n \
     --arg archive "$base" \
@@ -698,6 +890,7 @@ run_archive() {
     --arg mode "$run_mode" \
     --argjson media_missing "$media_missing" \
     --argjson album_failures "$album_failures" \
+    --argjson raw_converted "$raw_converted" \
     --argjson albums_processed "$(jq 'length' "$artifacts/albums.json" 2>/dev/null || echo 0)" \
     '{ archive: $archive,
        status: "OK",
@@ -708,6 +901,7 @@ run_archive() {
        uploaded_skipped: $skipped,
        uploaded_failed: $failed,
        media_missing: $media_missing,
+       raw_converted: $raw_converted,
        album_failures: $album_failures,
        albums_processed: $albums_processed }' > "$summary"
 
@@ -717,6 +911,82 @@ run_archive() {
     rm -rf "$extract_dir"
   fi
   mark_done "$base"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# Recovery reconciliation: after a successful recovery run, drop the archive's
+# old recovery entries and replace them with the ones that are still missing
+# (this run's validation output) plus the RAW files that could not be converted.
+# ---------------------------------------------------------------------------
+reconcile_recovery() {
+  local archive_name="$1" artifacts="$2"
+  local tmp run_rec="$artifacts/recovery-run.tsv" failed="$artifacts/raw-conversion-failed.tsv"
+  tmp=$(mktemp)
+  awk -F '\t' -v a="$archive_name" '$3 != a' "$RECOVERY_FILE" > "$tmp" || true
+  if [[ -s "$run_rec" ]]; then
+    cat "$run_rec" >> "$tmp"
+  fi
+  if [[ -s "$failed" ]]; then
+    cat "$failed" >> "$tmp"
+  fi
+  sort -u "$tmp" > "$RECOVERY_FILE" && rm -f "$tmp"
+  log "recovery reconciliation done — $archive_name still has $(awk -F '\t' -v a="$archive_name" '$3 == a' "$RECOVERY_FILE" | wc -l | tr -d ' ') pending entry(ies)"
+}
+
+# ---------------------------------------------------------------------------
+# Reprocess mode: read recovery.tsv, re-extract the affected archives, convert
+# the recorded RAW files to JPEG, upload, add to albums and clear the resolved
+# entries. Only files that actually recovered are removed from recovery.tsv;
+# still-missing and failed-conversion entries are preserved.
+# ---------------------------------------------------------------------------
+reprocess_recovery() {
+  local only="${1:-}" only_base=""
+  [[ -n "$only" ]] && only_base=$(basename "$only")
+  if [[ ! -s "$RECOVERY_FILE" ]]; then
+    log "recovery file is empty — nothing to reprocess"
+    return 0
+  fi
+  if [[ -z "$RAW_CONVERTER" ]]; then
+    err "--reprocess-recovery needs a RAW converter: install darktable-cli, or dcraw + ImageMagick convert"
+    return 1
+  fi
+
+  local -a archives=()
+  local a
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    if [[ -n "$only_base" && "$a" != "$only_base" ]]; then
+      continue
+    fi
+    archives+=("$a")
+  done < <(awk -F '\t' '{print $3}' "$RECOVERY_FILE" | sort -u)
+  if (( ${#archives[@]} == 0 )); then
+    log "no recovery entries for the requested archive(s)"
+    return 0
+  fi
+
+  local total=${#archives[@]} i archive full filter
+  for (( i = 0; i < total; i++ )); do
+    archive="${archives[$i]}"
+    full="$TAKEOUT_DIR/$archive"
+    if [[ ! -f "$full" ]]; then
+      err "archive not found for recovery entry: $full"
+      continue
+    fi
+    filter=$(mktemp)
+    awk -F '\t' -v a="$archive" '$3 == a { print $4 }' "$RECOVERY_FILE" | sort -u > "$filter"
+    RECOVERY_FILTER="$filter"
+    log ""
+    log "==== recovery: $archive ($(wc -l < "$filter" | tr -d ' ') entry/entries) ===="
+    if run_archive "$full" "$((i + 1))" "$total"; then
+      reconcile_recovery "$archive" "$LOG_DIR/run-$RUN_TS/$archive"
+    else
+      err "recovery run failed for $archive — entries kept in recovery.tsv"
+    fi
+    rm -f "$filter"
+    RECOVERY_FILTER=""
+  done
   return 0
 }
 
@@ -733,11 +1003,17 @@ main() {
       --keep-work) KEEP_WORK=1 ;;
       --resume) RESUME=1 ;;
       --albums-only) ALBUMS_ONLY=1 ;;
+      --convert-raw) CONVERT_RAW=1 ;;
+      --reprocess-recovery) REPROCESS_RECOVERY=1; CONVERT_RAW=1 ;;
       --archive) shift; only="${1:-}"; [[ -z "$only" ]] && { err "--archive requires a name"; return 2; } ;;
       *) err "unknown option: $1"; usage; return 2 ;;
     esac
     shift
   done
+
+  # Detect the RAW converter once at startup (needed by --convert-raw and
+  # --reprocess-recovery).
+  RAW_CONVERTER=$(detect_raw_converter)
 
   RUN_TS=$(date +%Y%m%d-%H%M%S)
   RUN_LOG="$LOG_DIR/import-$RUN_TS.log"
@@ -746,6 +1022,13 @@ main() {
 
   log "gphoto2proton-import: takeout=$TAKEOUT_DIR work=$WORK_DIR logs=$LOG_DIR state=$STATE_DIR"
   log "CLI=$CLI credentials_store=$PROTON_DRIVE_CREDENTIALS_STORE"
+  if (( CONVERT_RAW )); then
+    if [[ -n "$RAW_CONVERTER" ]]; then
+      log "RAW conversion: ON ($RAW_CONVERTER)"
+    else
+      log "WARN: RAW conversion requested but no converter found (need darktable-cli, or dcraw+convert)"
+    fi
+  fi
   if (( RESUME )) && (( ALBUMS_ONLY )); then
     log "WARN: --resume ignored in --albums-only mode"
   fi
@@ -762,6 +1045,12 @@ main() {
   if ! flock -n 9; then
     err "another import is already running"
     return 1
+  fi
+
+  # Recovery mode reads its own archive list from recovery.tsv.
+  if (( REPROCESS_RECOVERY )); then
+    reprocess_recovery "$only"
+    return $?
   fi
 
   # Archive selection.

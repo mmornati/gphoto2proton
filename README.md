@@ -136,7 +136,50 @@ TAKEOUT_DIR=/media/12tb/photos ~/gphoto2proton/gphoto2proton-import.sh
 | `--check` | Read-only: verify auth, list pending / done archives |
 | `--force` | Reprocess archives already marked as done |
 | `--keep-work` | Keep extracted files after success (for debugging) |
+| `--resume` | Skip upload/verify if artifacts from a previous run exist |
+| `--albums-only` | Only recreate albums for already-uploaded photos |
+| `--convert-raw` | Convert unsupported RAW formats (NEF/CR2/ARW) to JPEG before upload |
+| `--reprocess-recovery` | Re-process files recorded in `recovery.tsv` (implies `--convert-raw`) |
 | `--archive NAME` | Process only a single archive (name or path) |
+
+### RAW (NEF/CR2/ARW) support
+
+The `proton-drive` CLI **cannot ingest camera RAW formats** into Proton Photos:
+RAW files are silently skipped on upload and end up listed in
+`$STATE_DIR/recovery.tsv` as `missing_from_timeline` (non-fatal, since
+[#23](https://github.com/mmornati/gphoto2proton/pull/23)).
+
+To import them anyway, pass `--convert-raw`. The script detects the best
+available converter and turns each RAW file into a JPEG *before* the manifest
+is built, so it flows through upload/albums like any other photo:
+
+| Converter | Detection | Notes |
+|---|---|---|
+| `darktable-cli` | `command -v darktable-cli` | Best quality, writes JPEG directly, preserves EXIF |
+| `dcraw` + `convert` | `command -v dcraw && command -v convert` | Fallback; embeds EXIF via `exiftool` if present |
+
+Every conversion is logged (original relpath → converted relpath, sizes and
+SHA1s) to `$STATE_DIR/raw-conversions.tsv`. The original RAW file in the
+`.tgz` archive is always kept.
+
+### Recovering files already in `recovery.tsv`
+
+If you already ran an import **without** `--convert-raw`, the RAW files are
+sitting in `recovery.tsv` and were never uploaded. Recover them with:
+
+```bash
+# Recover ALL archives referenced in recovery.tsv
+./scripts/gphoto2proton-import.sh --reprocess-recovery
+
+# Recover a single archive
+./scripts/gphoto2proton-import.sh --reprocess-recovery --archive takeout-20260729T191210Z-1-001.tgz
+```
+
+`--reprocess-recovery` re-extracts the affected archives, converts the recorded
+RAW files to JPEG, uploads only those files (already-uploaded photos are not
+re-hashed or re-transferred), re-fetches the timeline, adds the new photos to
+their albums, and clears the resolved entries from `recovery.tsv`. Entries that
+still fail — or RAW files the converter could not process — are preserved.
 
 ### What happens per archive
 
