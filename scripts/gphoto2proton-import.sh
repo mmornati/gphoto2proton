@@ -68,7 +68,9 @@ Options:
   --check          Read-only: verify auth, list pending/done archives, exit.
   --force          Reprocess archives already marked as done.
   --keep-work      Keep extracted files after a successful import.
-  --resume         Skip upload/verify if artifacts from a previous run exist.
+  --resume         Continue from the last completed step: skips re-hashing,
+                   sidecar capture-date rewrites, upload/verify and any albums
+                   already processed (timeline is always re-fetched fresh).
   --albums-only    Only recreate albums from already-uploaded photos
                    (also reprocesses archives already marked as done).
   --convert-raw    Convert unsupported RAW formats (NEF/CR2/ARW) to JPEG
@@ -225,6 +227,91 @@ apply_sidecar_dates() {
 }
 
 # ---------------------------------------------------------------------------
+# Durable per-archive progress state.
+#
+# Kept in $STATE_DIR/progress/<archive>.json so a `--resume` run can continue
+# exactly where the previous run stopped instead of re-doing cheap/finished
+# steps (junk strip, sidecar dates, manifest, upload/verify) or already
+# completed albums. Written atomically (tmp + mv).
+#
+# Schema:
+#   { "steps": { "<step>": true, ... },
+#     "validate_albums": { "count": N },
+#     "albums": [ { name, uid, expected_members, matched_members, added_ok } ] }
+# ---------------------------------------------------------------------------
+PROGRESS_ROOT="$STATE_DIR/progress"
+
+progress_file() {
+  echo "$PROGRESS_ROOT/$1.json"
+}
+
+progress_init() {
+  local file="$1"
+  mkdir -p "$(dirname "$file")"
+  if [[ ! -f "$file" ]]; then
+    echo '{"steps":{},"validate_albums":{"count":0},"albums":[]}' > "$file"
+  fi
+}
+
+progress_reset() {
+  local file="$1"
+  mkdir -p "$(dirname "$file")"
+  echo '{"steps":{},"validate_albums":{"count":0},"albums":[]}' > "$file"
+}
+
+progress_step_done() {
+  local file="$1" step="$2"
+  [[ -f "$file" ]] || return 1
+  jq -e --arg s "$step" '.steps[$s] == true' "$file" >/dev/null 2>&1
+}
+
+progress_step_set() {
+  local file="$1" step="$2" tmp
+  progress_init "$file"
+  tmp=$(mktemp)
+  jq --arg s "$step" '.steps[$s] = true' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+progress_album_done() {
+  local file="$1" name="$2"
+  [[ -f "$file" ]] || return 1
+  jq -e --arg n "$name" '.albums | any(.name == $n)' "$file" >/dev/null 2>&1
+}
+
+progress_album_append() {
+  local file="$1" name="$2" uid="$3" expected="$4" matched="$5" ok="$6" tmp
+  progress_init "$file"
+  tmp=$(mktemp)
+  # Replace any prior entry with the same name (keeps re-runs idempotent).
+  jq --arg name "$name" --arg uid "$uid" \
+     --argjson expected "$expected" --argjson matched "$matched" --argjson ok "$ok" \
+     '.albums = ([ .albums[] | select(.name != $name) ] +
+                 [ { name: $name, uid: $uid, expected_members: $expected,
+                     matched_members: $matched, added_ok: $ok } ])' \
+     "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# Echo the albums array (all albums completed so far) as JSON.
+progress_album_results_json() {
+  local file="$1"
+  [[ -f "$file" ]] || { echo '[]'; return 0; }
+  jq -c '.albums' "$file" 2>/dev/null || echo '[]'
+}
+
+progress_validate_albums_count() {
+  local file="$1"
+  [[ -f "$file" ]] || { echo 0; return 0; }
+  jq -r '.validate_albums.count // 0' "$file" 2>/dev/null || echo 0
+}
+
+progress_validate_albums_set() {
+  local file="$1" count="$2" tmp
+  progress_init "$file"
+  tmp=$(mktemp)
+  jq --argjson count "$count" '.validate_albums.count = $count' "$file" > "$tmp" && mv "$tmp" "$file"
+}
+
+# ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
 preflight() {
@@ -365,19 +452,21 @@ build_recovery_manifest() {
 # Albums: JSON array of {name, members:[{filename,size,sha1}]}
 # Primary source: physical files in Albums/<name>/. Fallback: album.json.
 # ---------------------------------------------------------------------------
-discover_albums() {
-  local gp_dir="$1" out="$2"
-  local albums_root="$gp_dir/Albums"
-  echo '[]' > "$out"
-  [[ -d "$albums_root" ]] || return 0
-
+# Scan the immediate subdirectories of $root as albums (members from physical
+# media files, with an album.json fallback for empty dirs).
+_discover_albums_from_dir() {
+  local root="$1" out="$2"
   local tmp="$WORK_DIR/.album_tsv.$$"
   local first=1 album_dir name tsv f sha size members_json aj
   {
     echo '['
-    for album_dir in "$albums_root"/*/; do
+    for album_dir in "$root"/*/; do
       [[ -d "$album_dir" ]] || continue
       name=$(basename "$album_dir")
+      case "$name" in
+        "Albums") continue ;;                  # never treat the Albums folder itself as an album
+        "Photos from "*) continue ;;           # auto groupings, not albums
+      esac
       tsv="$tmp"
       : > "$tsv"
       while IFS= read -r -d '' f; do
@@ -411,6 +500,34 @@ discover_albums() {
   rm -f "$tmp"
 }
 
+discover_albums() {
+  local gp_dir="$1" out="$2"
+  echo '[]' > "$out"
+
+  # Primary source: physical files in Albums/<name>/.
+  local albums_root="$gp_dir/Albums"
+  if [[ -d "$albums_root" ]]; then
+    _discover_albums_from_dir "$albums_root" "$out"
+    return 0
+  fi
+
+  # Old-format takeouts have no Albums/ folder: albums are the immediate
+  # subdirectories of Google Photos/ (each folder = one album). Loose files at
+  # the root are non-album photos (still uploaded via the manifest).
+  local d has_subdirs=0
+  for d in "$gp_dir"/*/; do
+    [[ -d "$d" ]] || continue
+    has_subdirs=1
+    break
+  done
+  if (( has_subdirs )); then
+    log "no Albums/ folder — treating Google Photos/ subfolders as albums (old takeout format)"
+    _discover_albums_from_dir "$gp_dir" "$out"
+    return 0
+  fi
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Timeline index: sha1 -> uid, name -> uid
 # ---------------------------------------------------------------------------
@@ -437,6 +554,7 @@ name_to_uid() {
 # ---------------------------------------------------------------------------
 process_albums() {
   local albums_json="$1" timeline_base="$2" artifacts="$3"
+  local progress="$4" honor_markers="$5"
   local album_count
   album_count=$(jq 'length' "$albums_json")
   log "  albums: $album_count found in takeout"
@@ -451,96 +569,106 @@ process_albums() {
     err "album list failed"; return 1
   fi
 
-  local first=1 idx rc
-  {
-    echo '['
-    for (( idx = 0; idx < album_count; idx++ )); do
-      local name nmembers
-      name=$(jq -r --argjson i "$idx" '.[$i].name' "$albums_json")
-      nmembers=$(jq -r --argjson i "$idx" '.[$i].members | length' "$albums_json")
-      log "  album: \"$name\" ($nmembers members)"
+  local idx rc processed=0 skipped=0
+  for (( idx = 0; idx < album_count; idx++ )); do
+    local name nmembers
+    name=$(jq -r --argjson i "$idx" '.[$i].name' "$albums_json")
+    nmembers=$(jq -r --argjson i "$idx" '.[$i].members | length' "$albums_json")
 
-      if (( nmembers == 0 )); then
-        log "    WARN: empty album, skipping"
+    if (( honor_markers )) && progress_album_done "$progress" "$name"; then
+      log "  album: \"$name\" ($nmembers members) — already processed, skipping"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    log "  album: \"$name\" ($nmembers members)"
+
+    if (( nmembers == 0 )); then
+      log "    WARN: empty album, skipping"
+      continue
+    fi
+    if (( nmembers > 10000 )); then
+      err "album \"$name\" has $nmembers members (Proton limit is 10000). Split it in Google Photos first."
+      return 1
+    fi
+
+    local album_uid=""
+    album_uid=$(jq -r --arg n "$name" '.[] | select(.name.value == $n) | .uid' "$existing_json" | head -1)
+    if [[ -n "$album_uid" ]]; then
+      log "    exists, reusing uid $album_uid"
+    else
+      local create_json="$artifacts/album-create-$name.json"
+      "$CLI" album create --json "$name" > "$create_json" 2>"$artifacts/album-create-$name.err"; rc=$?
+      if (( rc != 0 )); then
+        err "album create failed for \"$name\""; return 1
+      fi
+      album_uid=$(jq -r '.uid' "$create_json")
+      log "    created uid $album_uid"
+    fi
+
+    # Resolve member uids (sha1 -> uid, fallback name -> uid), dedupe.
+    local -a uid_list=() seen=()
+    local j n m_sha1 m_name m_uid dup
+    for (( j = 0; j < nmembers; j++ )); do
+      m_sha1=$(jq -r --argjson i "$idx" --argjson j "$j" '.[$i].members[$j].sha1' "$albums_json")
+      m_name=$(jq -r --argjson i "$idx" --argjson j "$j" '.[$i].members[$j].filename' "$albums_json")
+      m_uid=""
+      if [[ -n "$m_sha1" ]]; then
+        m_uid=$(sha1_to_uid "$m_sha1" "$timeline_base.sha1")
+      fi
+      if [[ -z "$m_uid" ]]; then
+        m_uid=$(name_to_uid "$m_name" "$timeline_base.name")
+      fi
+      if [[ -z "$m_uid" ]]; then
+        log "    WARN: no timeline match for \"$m_name\" (sha1 ${m_sha1:-none})"
         continue
       fi
-      if (( nmembers > 10000 )); then
-        err "album \"$name\" has $nmembers members (Proton limit is 10000). Split it in Google Photos first."
-        return 1
+      dup=0
+      for n in "${seen[@]+"${seen[@]}"}"; do [[ "$n" == "$m_uid" ]] && dup=1 && break; done
+      if (( dup == 0 )); then
+        seen+=("$m_uid")
+        uid_list+=("$m_uid")
       fi
-
-      local album_uid=""
-      album_uid=$(jq -r --arg n "$name" '.[] | select(.name.value == $n) | .uid' "$existing_json" | head -1)
-      if [[ -n "$album_uid" ]]; then
-        log "    exists, reusing uid $album_uid"
-      else
-        local create_json="$artifacts/album-create-$name.json"
-        "$CLI" album create --json "$name" > "$create_json" 2>"$artifacts/album-create-$name.err"; rc=$?
-        if (( rc != 0 )); then
-          err "album create failed for \"$name\""; return 1
-        fi
-        album_uid=$(jq -r '.uid' "$create_json")
-        log "    created uid $album_uid"
-      fi
-
-      # Resolve member uids (sha1 -> uid, fallback name -> uid), dedupe.
-      local -a uid_list=() seen=()
-      local j n m_sha1 m_name m_uid dup
-      for (( j = 0; j < nmembers; j++ )); do
-        m_sha1=$(jq -r --argjson i "$idx" --argjson j "$j" '.[$i].members[$j].sha1' "$albums_json")
-        m_name=$(jq -r --argjson i "$idx" --argjson j "$j" '.[$i].members[$j].filename' "$albums_json")
-        m_uid=""
-        if [[ -n "$m_sha1" ]]; then
-          m_uid=$(sha1_to_uid "$m_sha1" "$timeline_base.sha1")
-        fi
-        if [[ -z "$m_uid" ]]; then
-          m_uid=$(name_to_uid "$m_name" "$timeline_base.name")
-        fi
-        if [[ -z "$m_uid" ]]; then
-          log "    WARN: no timeline match for \"$m_name\" (sha1 ${m_sha1:-none})"
-          continue
-        fi
-        dup=0
-        for n in "${seen[@]}"; do [[ "$n" == "$m_uid" ]] && dup=1 && break; done
-        if (( dup == 0 )); then
-          seen+=("$m_uid")
-          uid_list+=("$m_uid")
-        fi
-      done
-
-      if (( ${#uid_list[@]} == 0 )); then
-        err "album \"$name\": no members could be matched to the timeline"; return 1
-      fi
-
-      local -a photo_paths=()
-      for n in "${uid_list[@]}"; do photo_paths+=("/photos/$n"); done
-      local total=${#photo_paths[@]} start=0 end=0 ok_total=0 fail_total=0
-      local album_path="/albums/$album_uid"
-      while (( start < total )); do
-        end=$((start + CHUNK_SIZE)); (( end > total )) && end=$total
-        local batch=("${photo_paths[@]:start:CHUNK_SIZE}") add_out okc failc
-        add_out=$("$CLI" album add-photo --json "$album_path" "${batch[@]}" 2>"$artifacts/album-add-$name.err"); rc=$?
-        if (( rc != 0 )); then
-          err "album add-photo batch failed (rc=$rc) for \"$name\""; return 1
-        fi
-        okc=$(jq '[.[] | select(.ok == true)] | length' <<<"$add_out")
-        failc=$(jq '[.[] | select(.ok != true)] | length' <<<"$add_out")
-        ok_total=$((ok_total + okc)); fail_total=$((fail_total + failc))
-        log "    added $okc/$((end - start)) photos to \"$name\" ($fail_total failures so far)"
-        start=$end
-      done
-      (( fail_total > 0 )) && { err "album \"$name\": $fail_total member adds failed"; return 1; }
-
-      local album_artifacts="$artifacts/album-$name.json"
-      jq -n --arg name "$name" --arg uid "$album_uid" --argjson expected "$nmembers" --argjson added "${#uid_list[@]}" --argjson ok "$ok_total" \
-        '{ name: $name, uid: $uid, expected_members: $expected, matched_members: $added, added_ok: $ok }' > "$album_artifacts"
-
-      if (( first == 0 )); then echo ','; fi
-      cat "$album_artifacts"
-      first=0
     done
-    echo ']'
-  } > "$artifacts/albums.json"
+
+    if (( ${#uid_list[@]} == 0 )); then
+      err "album \"$name\": no members could be matched to the timeline"; return 1
+    fi
+
+    local -a photo_paths=()
+    for n in "${uid_list[@]}"; do photo_paths+=("/photos/$n"); done
+    local total=${#photo_paths[@]} start=0 end=0 ok_total=0 fail_total=0
+    local album_path="/albums/$album_uid"
+    while (( start < total )); do
+      end=$((start + CHUNK_SIZE)); (( end > total )) && end=$total
+      local batch=("${photo_paths[@]:start:CHUNK_SIZE}") add_out okc failc
+      add_out=$("$CLI" album add-photo --json "$album_path" "${batch[@]}" 2>"$artifacts/album-add-$name.err"); rc=$?
+      if (( rc != 0 )); then
+        err "album add-photo batch failed (rc=$rc) for \"$name\""; return 1
+      fi
+      okc=$(jq '[.[] | select(.ok == true)] | length' <<<"$add_out")
+      failc=$(jq '[.[] | select(.ok != true)] | length' <<<"$add_out")
+      ok_total=$((ok_total + okc)); fail_total=$((fail_total + failc))
+      log "    added $okc/$((end - start)) photos to \"$name\" ($fail_total failures so far)"
+      start=$end
+    done
+    (( fail_total > 0 )) && { err "album \"$name\": $fail_total member adds failed"; return 1; }
+
+    local album_artifacts="$artifacts/album-$name.json"
+    jq -n --arg name "$name" --arg uid "$album_uid" --argjson expected "$nmembers" --argjson added "${#uid_list[@]}" --argjson ok "$ok_total" \
+      '{ name: $name, uid: $uid, expected_members: $expected, matched_members: $added, added_ok: $ok }' > "$album_artifacts"
+
+    # Persist the completed album durably and refresh albums.json so an
+    # interruption after this album keeps everything done so far (the next
+    # --resume continues with the remaining albums).
+    progress_album_append "$progress" "$name" "$album_uid" "$nmembers" "${#uid_list[@]}" "$ok_total"
+    progress_album_results_json "$progress" > "$artifacts/albums.json"
+    processed=$((processed + 1))
+  done
+
+  # Final refresh of albums.json from the durable progress state.
+  progress_album_results_json "$progress" > "$artifacts/albums.json"
+  log "  albums: $processed processed, $skipped skipped"
   return 0
 }
 
@@ -583,11 +711,17 @@ validate_media() {
 
 validate_albums() {
   local result_json="$1" takeout_json="$2" timeline_base="$3" artifacts="$4"
+  local progress="$5" honor_markers="$6"
   jq empty "$result_json" 2>/dev/null || { err "albums.json is invalid — album processing may have failed"; return 1; }
   jq empty "$takeout_json" 2>/dev/null || { err "albums-takeout.json is invalid"; return 1; }
   local n a_fail=0
   n=$(jq 'length' "$result_json")
   if (( n == 0 )); then log "  validation: no albums to validate"; return 0; fi
+  if (( honor_markers )) && (( n == $(progress_validate_albums_count "$progress") )); then
+    log "  validation: album membership already validated ($n albums) — skipping"
+    echo 0
+    return 0
+  fi
   local idx uid takeout_name expected_shas actual_shas rc
   for (( idx = 0; idx < n; idx++ )); do
     uid=$(jq -r --argjson i "$idx" '.[$i].uid' "$result_json")
@@ -614,6 +748,7 @@ validate_albums() {
       log "  validation: album \"$takeout_name\" verified ($e/$e)"
     fi
   done
+  progress_validate_albums_set "$progress" "$n"
   (( a_fail > 0 )) && log "  WARN: $a_fail album(s) had membership issues (see above)"
   echo "$a_fail"
   return 0
@@ -624,10 +759,23 @@ validate_albums() {
 # ---------------------------------------------------------------------------
 run_archive() {
   local archive="$1" index="$2" total="$3"
-  local base artifacts extract_dir gp_dir
+  local base artifacts extract_dir gp_dir progress
   base=$(basename "$archive")
   artifacts="$LOG_DIR/run-$RUN_TS/$base"
   mkdir -p "$artifacts"
+
+  # Per-archive durable progress. `--resume` honors completed-step markers so
+  # the run continues exactly where it stopped; a full import / --force starts
+  # from a clean slate. --albums-only and --reprocess-recovery never honor
+  # markers (they recompute) but still write them for later resumes.
+  local honor_markers=0
+  progress=$(progress_file "$base")
+  if (( RESUME )) && (( ALBUMS_ONLY == 0 )) && (( REPROCESS_RECOVERY == 0 )); then
+    honor_markers=1
+    progress_init "$progress"
+  elif (( ALBUMS_ONLY == 0 )) && (( REPROCESS_RECOVERY == 0 )); then
+    progress_reset "$progress"
+  fi
 
   log ""
   log "==== $base ($index/$total) ===="
@@ -662,63 +810,11 @@ run_archive() {
     fi
   fi
 
-  log "stripping macOS metadata junk (._*, .DS_Store) ..."
-  strip_junk "$extract_dir"
-
-  # Sidecar dates only matter for upload (CLI reads mtime); skip in albums-only
-  # and recovery modes (recovery re-processes already-dated files).
-  if (( ALBUMS_ONLY == 0 )) && (( REPROCESS_RECOVERY == 0 )); then
-    log "applying original capture dates from sidecar JSON ..."
-    apply_sidecar_dates "$gp_dir"
-  fi
-
-  # RAW conversion: turn unsupported NEF/CR2/ARW into JPEG before the manifest
-  # is built, so they flow through upload/albums like any other photo.
-  if (( CONVERT_RAW )) && [[ -n "$RAW_CONVERTER" ]]; then
-    convert_raw_files "$gp_dir" "$artifacts" "$base"
-  fi
-
-  # Empty-archive check: bail early if no media files anywhere.
-  local any_media
-  any_media=$(find "$gp_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 2>/dev/null | head -c 1)
-  if [[ -z "$any_media" ]]; then
-    log "no media files found — treating as empty archive"
-    jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, media_missing: 0, album_failures: 0, albums_processed: 0 }' > "$artifacts/summary.json"
-    rm -rf "$extract_dir"
-    mark_done "$base"
-    return 0
-  fi
-
-  # Manifest: sha1sum of every media file in the whole Google Photos tree, or
-  # (recovery mode) only of the files listed in the recovery filter.
-  local manifest_tsv="$artifacts/manifest.tsv" manifest_json="$artifacts/manifest.json"
-  if (( REPROCESS_RECOVERY )); then
-    build_recovery_manifest "$gp_dir" "$RECOVERY_FILTER" "$manifest_tsv" "$manifest_json"
-  elif [[ -f "$manifest_json" ]]; then
-    log "reusing cached manifest ($(jq '.media_count' "$manifest_json") files)"
-  else
-    log "building manifest (sha1sum of all media files) ..."
-    build_manifest "$gp_dir" "$manifest_tsv" "$manifest_json" "$gp_dir"
-  fi
-  local expected_media expected_unique
-  expected_media=$(jq '.media_count' "$manifest_json")
-  expected_unique=$(jq '[.media[] | .sha1] | unique | length' "$manifest_json")
-  log "expected media: $expected_media files ($expected_unique unique)"
-
-  # Upload: whole tree.  The proton-drive CLI flattens folders, dedups by
-  # name+sha1, and only processes image/* and video/* (sidecar .json etc. are
-  # silently ignored).  Album-folder copies of the same photo are skipped.
-  local upload_json="$artifacts/upload.json" rc
-  local verify_json="$artifacts/upload-verify.json"
-  local timeline_json="$artifacts/timeline.json" timeline_base="$artifacts/timeline-index"
-  local transferred=0 skipped=0 failed=0
-  local run_mode="import"
-
   # --resume: locate the most recent PREVIOUS run's artifacts for this archive.
   # (This run's artifact dir run-$RUN_TS/$base was just created empty above, so
   # previous runs must be found under their own run-<ts> directories.)
   local prev_artifacts=""
-  if (( RESUME )) && (( ALBUMS_ONLY == 0 )); then
+  if (( honor_markers )); then
     local d
     for d in "$LOG_DIR"/run-*/"$base"; do
       [[ -d "$d" ]] || continue
@@ -734,6 +830,93 @@ run_archive() {
     done
     [[ -z "$prev_artifacts" ]] && log "resume requested but no complete previous artifacts found — full upload"
   fi
+
+  # Upload+verify is already complete when recorded in the progress file or when
+  # a complete previous run's artifacts were found (legacy runs without progress).
+  local upload_done=0
+  if (( honor_markers )); then
+    if progress_step_done "$progress" upload_verify || [[ -n "$prev_artifacts" ]]; then
+      upload_done=1
+    fi
+  fi
+
+  # Step: strip macOS junk (resumable).
+  if (( honor_markers )) && progress_step_done "$progress" junk; then
+    log "skipping junk strip (already done)"
+  else
+    log "stripping macOS metadata junk (._*, .DS_Store) ..."
+    strip_junk "$extract_dir"
+    progress_step_set "$progress" junk
+  fi
+
+  # Step: sidecar capture dates. Only matters pre-upload (CLI reads mtime), so
+  # skip in albums-only/recovery modes AND on resume once the upload is done.
+  if (( ALBUMS_ONLY == 0 )) && (( REPROCESS_RECOVERY == 0 )); then
+    if (( honor_markers )) && progress_step_done "$progress" sidecar_dates; then
+      log "skipping sidecar capture-date application (already done)"
+    elif (( honor_markers )) && (( upload_done )); then
+      log "skipping sidecar capture-date application (upload already complete)"
+    else
+      log "applying original capture dates from sidecar JSON ..."
+      apply_sidecar_dates "$gp_dir"
+      progress_step_set "$progress" sidecar_dates
+    fi
+  fi
+
+  # Step: RAW conversion (resumable; skipped on resume once the photos are up).
+  if (( CONVERT_RAW )) && [[ -n "$RAW_CONVERTER" ]]; then
+    if (( honor_markers )) && progress_step_done "$progress" raw_convert; then
+      log "skipping RAW conversion (already done)"
+    elif (( honor_markers )) && (( upload_done )); then
+      log "skipping RAW conversion (upload already complete)"
+    else
+      convert_raw_files "$gp_dir" "$artifacts" "$base"
+      progress_step_set "$progress" raw_convert
+    fi
+  fi
+
+  # Empty-archive check: bail early if no media files anywhere.
+  local any_media
+  any_media=$(find "$gp_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 2>/dev/null | head -c 1)
+  if [[ -z "$any_media" ]]; then
+    log "no media files found — treating as empty archive"
+    jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, media_missing: 0, album_failures: 0, albums_processed: 0 }' > "$artifacts/summary.json"
+    rm -rf "$extract_dir"
+    mark_done "$base"
+    return 0
+  fi
+
+  # Step: manifest (sha1 index). Content-addressed, so a previous run's
+  # manifest.json stays valid and can be reused across resume runs (this also
+  # fixes the manifest cache that only ever looked in the per-run artifact dir).
+  local manifest_tsv="$artifacts/manifest.tsv" manifest_json="$artifacts/manifest.json"
+  if (( REPROCESS_RECOVERY )); then
+    build_recovery_manifest "$gp_dir" "$RECOVERY_FILTER" "$manifest_tsv" "$manifest_json"
+  elif [[ -f "$manifest_json" ]]; then
+    log "reusing cached manifest ($(jq '.media_count' "$manifest_json") files)"
+    progress_step_set "$progress" manifest
+  elif [[ -n "$prev_artifacts" ]] && [[ -f "$prev_artifacts/manifest.json" ]]; then
+    cp "$prev_artifacts/manifest.json" "$manifest_json"
+    log "reusing manifest from previous run ($(jq '.media_count' "$manifest_json") files)"
+    progress_step_set "$progress" manifest
+  else
+    log "building manifest (sha1sum of all media files) ..."
+    build_manifest "$gp_dir" "$manifest_tsv" "$manifest_json" "$gp_dir"
+    progress_step_set "$progress" manifest
+  fi
+  local expected_media expected_unique
+  expected_media=$(jq '.media_count' "$manifest_json")
+  expected_unique=$(jq '[.media[] | .sha1] | unique | length' "$manifest_json")
+  log "expected media: $expected_media files ($expected_unique unique)"
+
+  # Upload: whole tree.  The proton-drive CLI flattens folders, dedups by
+  # name+sha1, and only processes image/* and video/* (sidecar .json etc. are
+  # silently ignored).  Album-folder copies of the same photo are skipped.
+  local upload_json="$artifacts/upload.json" rc
+  local verify_json="$artifacts/upload-verify.json"
+  local timeline_json="$artifacts/timeline.json" timeline_base="$artifacts/timeline-index"
+  local transferred=0 skipped=0 failed=0
+  local run_mode="import"
 
   # Recovery mode: stage only the recovered files so the upload/verify pass does
   # not re-hash the whole archive (already-uploaded photos stay untouched).
@@ -773,20 +956,40 @@ run_archive() {
       err "timeline index is empty — invalid timeline response?"; return 1
     fi
     log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+    progress_step_set "$progress" timeline
 
-  elif [[ -n "$prev_artifacts" ]] && (( REPROCESS_RECOVERY == 0 )); then
+  elif (( upload_done )); then
     run_mode="resume"
-    log "resume mode: reusing upload + timeline artifacts from $prev_artifacts"
-    upload_json="$prev_artifacts/upload.json"
-    timeline_base="$prev_artifacts/timeline-index"
-    transferred=$(jq '.transferredItems' "$upload_json")
-    skipped=$(jq '.skippedItems' "$upload_json")
-    failed=$(jq '.failedItems' "$upload_json")
-    log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
-    if (( failed > 0 )); then
-      err "cached upload reported $failed failures — re-run without --resume to retry"
-      return 1
+    log "resume mode: skipping upload/verify (already complete)"
+    if [[ -n "$prev_artifacts" ]]; then
+      upload_json="$prev_artifacts/upload.json"
+      transferred=$(jq '.transferredItems' "$upload_json")
+      skipped=$(jq '.skippedItems' "$upload_json")
+      failed=$(jq '.failedItems' "$upload_json")
+      log "upload summary (previous run): transferred=$transferred skipped=$skipped failed=$failed"
+      if (( failed > 0 )); then
+        err "cached upload reported $failed failures — re-run without --resume to retry"
+        return 1
+      fi
+    else
+      log "upload summary: not available (previous run artifacts were cleaned up)"
     fi
+    # The previous run's timeline index may be stale: fix-photo-date.sh and RAW
+    # conversion re-upload photos that get NEW uids for the SAME sha1. Always
+    # fetch a fresh timeline on resume so album/validation steps see current
+    # uid mappings.
+    log "resume mode: fetching fresh photos timeline ..."
+    "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo timeline failed (rc=$rc)"; return 1
+    fi
+    build_timeline_index "$timeline_json" "$timeline_base"
+    if [[ ! -s "$timeline_base.sha1" ]]; then
+      err "timeline index is empty — invalid timeline response?"; return 1
+    fi
+    log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+    progress_step_set "$progress" upload_verify
+    progress_step_set "$progress" timeline
 
   else
     if (( REPROCESS_RECOVERY )); then
@@ -839,6 +1042,8 @@ run_archive() {
       err "timeline index is empty — invalid timeline response?"; return 1
     fi
     log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+    progress_step_set "$progress" upload_verify
+    progress_step_set "$progress" timeline
   fi
 
   # Albums-only precondition: the archive must actually be uploaded already.
@@ -862,18 +1067,30 @@ run_archive() {
     rec_target="$artifacts/recovery-run.tsv"
     : > "$rec_target"
   fi
-  validate_media "$manifest_json" "$timeline_base" "$artifacts" "$rec_target" "$base"
+  if (( honor_markers )) && progress_step_done "$progress" validate_media; then
+    # Already validated in a previous run — preserve that result (recovery.tsv
+    # holds the durable record). Carry the report over for the summary count.
+    if [[ ! -f "$artifacts/validation-missing.tsv" ]]; then
+      if [[ -n "$prev_artifacts" ]] && [[ -f "$prev_artifacts/validation-missing.tsv" ]]; then
+        cp "$prev_artifacts/validation-missing.tsv" "$artifacts/validation-missing.tsv"
+      fi
+    fi
+    log "skipping media validation (already validated in a previous run)"
+  else
+    validate_media "$manifest_json" "$timeline_base" "$artifacts" "$rec_target" "$base"
+    progress_step_set "$progress" validate_media
+  fi
   local media_missing=0
   [[ -f "$artifacts/validation-missing.tsv" ]] && media_missing=$(wc -l < "$artifacts/validation-missing.tsv")
 
   # Albums.
   local albums_json="$artifacts/albums-takeout.json"
   discover_albums "$gp_dir" "$albums_json"
-  process_albums "$albums_json" "$timeline_base" "$artifacts" || return 1
+  process_albums "$albums_json" "$timeline_base" "$artifacts" "$progress" "$honor_markers" || return 1
 
   # Validation 2: album membership (non-fatal).
   local album_failures
-  album_failures=$(validate_albums "$artifacts/albums.json" "$artifacts/albums-takeout.json" "$timeline_base" "$artifacts") || true
+  album_failures=$(validate_albums "$artifacts/albums.json" "$artifacts/albums-takeout.json" "$timeline_base" "$artifacts" "$progress" "$honor_markers") || true
   album_failures=${album_failures:-0}
 
   # Summary + state + cleanup.
@@ -1013,7 +1230,7 @@ main() {
 
   # Detect the RAW converter once at startup (needed by --convert-raw and
   # --reprocess-recovery).
-  RAW_CONVERTER=$(detect_raw_converter)
+  RAW_CONVERTER=$(detect_raw_converter || true)
 
   RUN_TS=$(date +%Y%m%d-%H%M%S)
   RUN_LOG="$LOG_DIR/import-$RUN_TS.log"
@@ -1075,8 +1292,13 @@ main() {
     return 1
   fi
 
-  # Sort, drop done ones (unless --force).
-  mapfile -t archives < <(printf '%s\n' "${archives[@]}" | sort)
+  # Sort (portable: mapfile/readarray require bash 4).
+  local -a sorted_archives=()
+  while IFS= read -r a; do
+    [[ -n "$a" ]] || continue
+    sorted_archives+=("$a")
+  done < <(printf '%s\n' "${archives[@]}" | sort)
+  archives=("${sorted_archives[@]}")
   local -a todo=()
   for a in "${archives[@]}"; do
     # --albums-only manages albums for already-imported archives, so it must
