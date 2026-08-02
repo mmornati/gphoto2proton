@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+#
+# Mock proton-drive CLI used by scripts/tests/run-tests.sh.
+#
+# Emulates a minimal Photos backend on top of $MOCK_STORE (a directory whose
+# files are named <sha1>.<ext> — one per uploaded photo), plus per-album
+# records under $MOCK_STORE/albums/. Every invocation is appended to $MOCK_LOG
+# so tests can assert call counts.
+#
+# The uid of a photo is its sha1, which keeps timeline/album resolution
+# consistent. MOCK_FAIL_ALBUMS (comma-separated album names) makes
+# `album add-photo` fail for those albums — used to exercise resume behavior.
+set -u
+umask 077
+
+MOCK_STORE="${MOCK_STORE:?MOCK_STORE not set}"
+MOCK_LOG="${MOCK_LOG:?MOCK_LOG not set}"
+MOCK_FAIL_ALBUMS="${MOCK_FAIL_ALBUMS:-}"
+
+mkdir -p "$MOCK_STORE" "$MOCK_STORE/albums"
+printf '%s\n' "$*" >> "$MOCK_LOG"
+
+is_media() {
+  case "${1##*.}" in
+    jpg|jpeg|png|gif|heic|mov|mp4) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+uid_for() {
+  printf 'u-%s\n' "$(printf '%s' "$1" | sha1sum | cut -c1-14)"
+}
+
+# Print the album name whose uid equals $1 (empty + rc=1 when unknown).
+album_name_for_uid() {
+  local f name uid
+  for f in "$MOCK_STORE"/albums/*.name; do
+    [[ -f "$f" ]] || continue
+    name=$(cat "$f")
+    uid=$(uid_for "$name")
+    if [[ "$uid" == "$1" ]]; then
+      printf '%s' "$name"
+      return 0
+    fi
+  done
+  return 1
+}
+
+cmd_album_list() {
+  local first=1 f name uid out="["
+  for f in "$MOCK_STORE"/albums/*.name; do
+    [[ -f "$f" ]] || continue
+    name=$(cat "$f")
+    uid=$(uid_for "$name")
+    if (( first == 0 )); then out+=","; fi
+    out+="{\"name\":{\"value\":\"$name\",\"ok\":true},\"uid\":\"$uid\"}"
+    first=0
+  done
+  printf '%s\n' "$out]"
+}
+
+cmd_album_create() {
+  local name=""
+  for a in "$@"; do name="$a"; done
+  local uid
+  uid=$(uid_for "$name")
+  printf '%s\n' "$name" > "$MOCK_STORE/albums/$name.name"
+  : > "$MOCK_STORE/albums/$name.members"
+  printf '{"uid":"%s"}\n' "$uid"
+}
+
+cmd_album_add_photo() {
+  local album_path="" name p out="[" a
+  local -a photos=()
+  local first=1
+  for a in "${@:3}"; do
+    case "$a" in
+      /albums/*) album_path="$a" ;;
+      /photos/*) photos+=("$a") ;;
+    esac
+  done
+  name=$(album_name_for_uid "${album_path#/albums/}") || {
+    printf 'mock: unknown album %s\n' "$album_path" >&2; exit 1; }
+  if [[ -n "$MOCK_FAIL_ALBUMS" ]] && printf ',%s,' "$MOCK_FAIL_ALBUMS" | grep -q ",${name},"; then
+    printf "mock: configured failure for album '%s'\n" "$name" >&2
+    exit 1
+  fi
+  for p in "${photos[@]}"; do
+    printf '%s\n' "${p#/photos/}" >> "$MOCK_STORE/albums/$name.members"
+    if (( first == 0 )); then out+=","; fi
+    out+="{\"ok\":true,\"photo\":\"${p#/photos/}\"}"
+    first=0
+  done
+  printf '%s\n' "$out]"
+}
+
+cmd_album_photos() {
+  local album_path="" name a out="[" sha
+  local first=1
+  for a in "$@"; do
+    case "$a" in
+      /albums/*) album_path="$a" ;;
+    esac
+  done
+  name=$(album_name_for_uid "${album_path#/albums/}") || { printf '[]\n'; return 0; }
+  while IFS= read -r sha; do
+    [[ -n "$sha" ]] || continue
+    if (( first == 0 )); then out+=","; fi
+    out+="{\"id\":\"$sha\",\"name\":{\"value\":\"$sha.jpg\",\"ok\":true},\"activeRevision\":{\"claimedDigests\":{\"sha1\":\"$sha\"}}}"
+    first=0
+  done < "$MOCK_STORE/albums/$name.members"
+  printf '%s\n' "$out]"
+}
+
+cmd_photo_upload() {
+  local dir="" f sha ext transferred=0 skipped=0
+  for a in "$@"; do dir="$a"; done
+  if [[ ! -d "$dir" ]]; then
+    printf 'mock: upload dir %s missing\n' "$dir" >&2
+    exit 1
+  fi
+  while IFS= read -r -d '' f; do
+    is_media "$f" || continue
+    sha=$(sha1sum "$f" | awk '{print $1}')
+    ext="${f##*.}"
+    if [[ -f "$MOCK_STORE/$sha.$ext" ]]; then
+      skipped=$((skipped + 1))
+    else
+      cp "$f" "$MOCK_STORE/$sha.$ext"
+      transferred=$((transferred + 1))
+    fi
+  done < <(find "$dir" -type f -print0)
+  printf '{"transferredItems":%d,"skippedItems":%d,"failedItems":0,"failures":[]}\n' "$transferred" "$skipped"
+}
+
+cmd_photo_timeline() {
+  local first=1 f base sha out="["
+  for f in "$MOCK_STORE"/*.*; do
+    [[ -f "$f" ]] || continue
+    base=$(basename "$f")
+    case "$base" in
+      *.name|*.members) continue ;;
+    esac
+    sha="${base%.*}"
+    if (( first == 0 )); then out+=","; fi
+    out+="{\"name\":{\"value\":\"$base\",\"ok\":true},\"uid\":\"$sha\",\"activeRevision\":{\"claimedDigests\":{\"sha1\":\"$sha\"}}}"
+    first=0
+  done
+  printf '%s\n' "$out]"
+}
+
+case "${1:-}" in
+  album)
+    case "${2:-}" in
+      list) cmd_album_list ;;
+      create) cmd_album_create "$@" ;;
+      add-photo) cmd_album_add_photo "$@" ;;
+      photos) cmd_album_photos "$@" ;;
+      *) printf 'mock: unknown album subcommand: %s\n' "$2" >&2; exit 1 ;;
+    esac
+    ;;
+  photo)
+    case "${2:-}" in
+      upload) cmd_photo_upload "$@" ;;
+      timeline) cmd_photo_timeline "$@" ;;
+      *) printf 'mock: unknown photo subcommand: %s\n' "$2" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    printf 'mock: unknown command: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
