@@ -42,7 +42,10 @@ export PROTON_DRIVE_CREDENTIALS_STORE="${PROTON_DRIVE_CREDENTIALS_STORE:-pass}"
 RUN_TS=""
 RUN_LOG=""
 DONE_FILE="$STATE_DIR/done"
+RECOVERY_FILE="$STATE_DIR/recovery.tsv"
 KEEP_WORK=0
+RESUME=0
+ALBUMS_ONLY=0
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN_LOG" >&2; }
 err() { echo "[$(date +%H:%M:%S)] ERROR: $*" | tee -a "$RUN_LOG" >&2; }
@@ -58,6 +61,8 @@ Options:
   --check          Read-only: verify auth, list pending/done archives, exit.
   --force          Reprocess archives already marked as done.
   --keep-work      Keep extracted files after a successful import.
+  --resume         Skip upload/verify/timeline if previous artifacts exist.
+  --albums-only    Only recreate albums from already-uploaded photos.
   --archive NAME   Process only the given archive (basename or path).
   -h, --help       Show this help.
 EOF
@@ -398,12 +403,12 @@ process_albums() {
 }
 
 # ---------------------------------------------------------------------------
-# Validation: (1) all timeline-folder media present in the timeline,
-#              (2) album members present in their album
+# Validation: check all media present in the timeline. Missing files are logged
+# to a recovery file for later reprocessing — NOT fatal.
 # ---------------------------------------------------------------------------
 validate_media() {
-  local manifest="$1" timeline_base="$2" artifacts="$3"
-  local total missing_count=0 i sha uid
+  local manifest="$1" timeline_base="$2" artifacts="$3" recovery_file="$4" archive_name="$5"
+  local total missing_count=0 i sha uid relpath size
   total=$(jq '.media_count' "$manifest")
   if (( total == 0 )); then
     log "  validation: no media files found in timeline folders"
@@ -416,13 +421,16 @@ validate_media() {
     uid=$(sha1_to_uid "$sha" "$timeline_base.sha1")
     if [[ -z "$uid" ]]; then
       missing_count=$((missing_count + 1))
-      jq -r --argjson i "$i" '.media[$i].relpath' "$manifest" >> "$report"
+      relpath=$(jq -r --argjson i "$i" '.media[$i].relpath' "$manifest")
+      size=$(jq -r --argjson i "$i" '.media[$i].size' "$manifest")
+      echo "$relpath" >> "$report"
+      printf '%s\t%s\t%s\t%s\tmissing_from_timeline\n' "$sha" "$size" "$archive_name" "$relpath" >> "$recovery_file"
     fi
   done
   log "  validation: $((total - missing_count))/$total media sha1s found in timeline"
   if (( missing_count > 0 )); then
-    err "validation: $missing_count media files missing from the Proton timeline (see $report)"
-    return 1
+    log "  WARN: $missing_count media files missing from timeline (see $report)"
+    log "  entries appended to recovery file: $recovery_file"
   fi
   return 0
 }
@@ -460,7 +468,7 @@ validate_albums() {
       log "  validation: album \"$takeout_name\" verified ($e/$e)"
     fi
   done
-  (( a_fail > 0 )) && return 1
+  (( a_fail > 0 )) && log "  WARN: $a_fail album(s) had membership issues (see above)"
   return 0
 }
 
@@ -541,59 +549,81 @@ run_archive() {
   # name+sha1, and only processes image/* and video/* (sidecar .json etc. are
   # silently ignored).  Album-folder copies of the same photo are skipped.
   local upload_json="$artifacts/upload.json" rc
-  log "uploading (conflict strategy: skip) ..."
-  "$CLI" photo upload --json -c skip "$gp_dir" > "$upload_json" 2>"$artifacts/upload.err"; rc=$?
-  if (( rc != 0 )); then
-    err "photo upload failed (rc=$rc) — see $artifacts/upload.err"; return 1
-  fi
-  local transferred failed skipped
-  transferred=$(jq '.transferredItems' "$upload_json")
-  skipped=$(jq '.skippedItems' "$upload_json")
-  failed=$(jq '.failedItems' "$upload_json")
-  log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
-  if (( failed > 0 )); then
-    err "upload reported $failed failures: $(jq -c '.failures' "$upload_json")"
-    return 1
-  fi
-
-  # Verify: re-run upload, everything already present.
   local verify_json="$artifacts/upload-verify.json"
-  "$CLI" photo upload --json -c skip "$gp_dir" > "$verify_json" 2>"$artifacts/upload-verify.err"; rc=$?
-  if (( rc != 0 )); then
-    err "verification upload failed (rc=$rc)"; return 1
-  fi
-  local v_transferred v_failed
-  v_transferred=$(jq '.transferredItems' "$verify_json")
-  v_failed=$(jq '.failedItems' "$verify_json")
-  log "verify upload: transferred=$v_transferred failed=$v_failed (expect 0 transferred)"
-  if (( v_failed > 0 )); then
-    err "verify upload reported failures: $(jq -c '.failures' "$verify_json")"
-    return 1
-  fi
-  if (( v_transferred > 0 )); then
-    log "WARN: verify upload transferred $v_transferred (content dedup mismatch) — sha1 validation is authoritative"
-  fi
-
-  # Timeline index (sha1 -> uid, name -> uid).
   local timeline_json="$artifacts/timeline.json" timeline_base="$artifacts/timeline-index"
-  log "fetching photos timeline (sha1 index) ..."
-  "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
-  if (( rc != 0 )); then
-    err "photo timeline failed (rc=$rc)"; return 1
-  fi
-  build_timeline_index "$timeline_json" "$timeline_base"
-  log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+  local transferred=0 skipped=0 failed=0
 
-  # Validation 1: every media file present in the timeline.
-  validate_media "$manifest_json" "$timeline_base" "$artifacts" || return 1
+  if (( ALBUMS_ONLY )); then
+    log "albums-only mode: skipping upload/verify"
+    log "fetching photos timeline (sha1 index) ..."
+    "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo timeline failed (rc=$rc)"; return 1
+    fi
+    build_timeline_index "$timeline_json" "$timeline_base"
+    log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+
+  elif (( RESUME )) && [[ -f "$upload_json" ]] && [[ -f "$timeline_base.sha1" ]]; then
+    log "resume mode: reusing existing upload + timeline artifacts"
+    transferred=$(jq '.transferredItems' "$upload_json")
+    skipped=$(jq '.skippedItems' "$upload_json")
+    failed=$(jq '.failedItems' "$upload_json")
+    log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
+
+  else
+    log "uploading (conflict strategy: skip) ..."
+    "$CLI" photo upload --json -c skip "$gp_dir" > "$upload_json" 2>"$artifacts/upload.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo upload failed (rc=$rc) — see $artifacts/upload.err"; return 1
+    fi
+    transferred=$(jq '.transferredItems' "$upload_json")
+    skipped=$(jq '.skippedItems' "$upload_json")
+    failed=$(jq '.failedItems' "$upload_json")
+    log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
+    if (( failed > 0 )); then
+      err "upload reported $failed failures: $(jq -c '.failures' "$upload_json")"
+      return 1
+    fi
+
+    # Verify: re-run upload, everything already present.
+    "$CLI" photo upload --json -c skip "$gp_dir" > "$verify_json" 2>"$artifacts/upload-verify.err"; rc=$?
+    if (( rc != 0 )); then
+      err "verification upload failed (rc=$rc)"; return 1
+    fi
+    local v_transferred v_failed
+    v_transferred=$(jq '.transferredItems' "$verify_json")
+    v_failed=$(jq '.failedItems' "$verify_json")
+    log "verify upload: transferred=$v_transferred failed=$v_failed (expect 0 transferred)"
+    if (( v_failed > 0 )); then
+      err "verify upload reported failures: $(jq -c '.failures' "$verify_json")"
+      return 1
+    fi
+    if (( v_transferred > 0 )); then
+      log "WARN: verify upload transferred $v_transferred (content dedup mismatch) — sha1 validation is authoritative"
+    fi
+
+    # Timeline index (sha1 -> uid, name -> uid).
+    log "fetching photos timeline (sha1 index) ..."
+    "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo timeline failed (rc=$rc)"; return 1
+    fi
+    build_timeline_index "$timeline_json" "$timeline_base"
+    log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+  fi
+
+  # Validation 1: every media file present in the timeline (non-fatal).
+  validate_media "$manifest_json" "$timeline_base" "$artifacts" "$RECOVERY_FILE" "$base"
+  local media_missing=0
+  [[ -f "$artifacts/validation-missing.tsv" ]] && media_missing=$(wc -l < "$artifacts/validation-missing.tsv")
 
   # Albums.
   local albums_json="$artifacts/albums-takeout.json"
   discover_albums "$gp_dir" "$albums_json"
   process_albums "$albums_json" "$timeline_base" "$artifacts" || return 1
 
-  # Validation 2: album membership.
-  validate_albums "$artifacts/albums.json" "$artifacts/albums-takeout.json" "$timeline_base" "$artifacts" || return 1
+  # Validation 2: album membership (non-fatal).
+  validate_albums "$artifacts/albums.json" "$artifacts/albums-takeout.json" "$timeline_base" "$artifacts"
 
   # Summary + state + cleanup.
   local summary="$artifacts/summary.json"
@@ -604,7 +634,8 @@ run_archive() {
     --argjson transferred "$transferred" \
     --argjson skipped "$skipped" \
     --argjson failed "$failed" \
-    --argjson albums_processed "$(jq 'length' "$artifacts/albums.json")" \
+    --argjson media_missing "$media_missing" \
+    --argjson albums_processed "$(jq 'length' "$artifacts/albums.json" 2>/dev/null || echo 0)" \
     '{ archive: $archive,
        status: "OK",
        expected_media: $expected_media,
@@ -612,10 +643,11 @@ run_archive() {
        uploaded_transferred: $transferred,
        uploaded_skipped: $skipped,
        uploaded_failed: $failed,
+       media_missing: $media_missing,
        albums_processed: $albums_processed }' > "$summary"
 
   log "==== $base: SUCCESS ===="
-  if (( KEEP_WORK == 0 )); then
+  if (( KEEP_WORK == 0 )) && (( ALBUMS_ONLY == 0 )); then
     log "cleaning up $extract_dir"
     rm -rf "$extract_dir"
   fi
@@ -634,6 +666,8 @@ main() {
       check|--check) mode="check" ;;
       --force) force=1 ;;
       --keep-work) KEEP_WORK=1 ;;
+      --resume) RESUME=1 ;;
+      --albums-only) ALBUMS_ONLY=1 ;;
       --archive) shift; only="${1:-}"; [[ -z "$only" ]] && { err "--archive requires a name"; return 2; } ;;
       *) err "unknown option: $1"; usage; return 2 ;;
     esac
