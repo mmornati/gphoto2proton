@@ -18,7 +18,8 @@
 # where the `proton-drive` CLI is installed.
 #
 # Usage:
-#   gphoto2proton-import.sh [--check] [--force] [--keep-work] [--archive NAME]
+#   gphoto2proton-import.sh [--check] [--force] [--keep-work] [--resume]
+#                           [--albums-only] [--archive NAME]
 #
 # Env vars (defaults shown):
 #   CLI                            proton-drive
@@ -42,7 +43,10 @@ export PROTON_DRIVE_CREDENTIALS_STORE="${PROTON_DRIVE_CREDENTIALS_STORE:-pass}"
 RUN_TS=""
 RUN_LOG=""
 DONE_FILE="$STATE_DIR/done"
+RECOVERY_FILE="$STATE_DIR/recovery.tsv"
 KEEP_WORK=0
+RESUME=0
+ALBUMS_ONLY=0
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN_LOG" >&2; }
 err() { echo "[$(date +%H:%M:%S)] ERROR: $*" | tee -a "$RUN_LOG" >&2; }
@@ -58,6 +62,9 @@ Options:
   --check          Read-only: verify auth, list pending/done archives, exit.
   --force          Reprocess archives already marked as done.
   --keep-work      Keep extracted files after a successful import.
+  --resume         Skip upload/verify if artifacts from a previous run exist.
+  --albums-only    Only recreate albums from already-uploaded photos
+                   (also reprocesses archives already marked as done).
   --archive NAME   Process only the given archive (basename or path).
   -h, --help       Show this help.
 EOF
@@ -84,7 +91,7 @@ strip_junk() {
 }
 
 is_done() { grep -qxF "$1" "$DONE_FILE" 2>/dev/null; }
-mark_done() { echo "$1" >> "$DONE_FILE"; }
+mark_done() { is_done "$1" || echo "$1" >> "$DONE_FILE"; }
 
 # Apply capture dates from Google Photos sidecar JSON (<file>.<ext>.json).
 # Images: CLI reads EXIF natively (correct by default).
@@ -398,12 +405,12 @@ process_albums() {
 }
 
 # ---------------------------------------------------------------------------
-# Validation: (1) all timeline-folder media present in the timeline,
-#              (2) album members present in their album
+# Validation: check all media present in the timeline. Missing files are logged
+# to a recovery file for later reprocessing — NOT fatal.
 # ---------------------------------------------------------------------------
 validate_media() {
-  local manifest="$1" timeline_base="$2" artifacts="$3"
-  local total missing_count=0 i sha uid
+  local manifest="$1" timeline_base="$2" artifacts="$3" recovery_file="$4" archive_name="$5"
+  local total missing_count=0 i sha uid relpath size
   total=$(jq '.media_count' "$manifest")
   if (( total == 0 )); then
     log "  validation: no media files found in timeline folders"
@@ -416,13 +423,20 @@ validate_media() {
     uid=$(sha1_to_uid "$sha" "$timeline_base.sha1")
     if [[ -z "$uid" ]]; then
       missing_count=$((missing_count + 1))
-      jq -r --argjson i "$i" '.media[$i].relpath' "$manifest" >> "$report"
+      relpath=$(jq -r --argjson i "$i" '.media[$i].relpath' "$manifest")
+      size=$(jq -r --argjson i "$i" '.media[$i].size' "$manifest")
+      printf '%s\n' "$relpath" >> "$report"
+      printf '%s\t%s\t%s\t%s\tmissing_from_timeline\n' "$sha" "$size" "$archive_name" "$relpath" >> "$recovery_file"
     fi
   done
   log "  validation: $((total - missing_count))/$total media sha1s found in timeline"
   if (( missing_count > 0 )); then
-    err "validation: $missing_count media files missing from the Proton timeline (see $report)"
-    return 1
+    log "  WARN: $missing_count media files missing from timeline (see $report)"
+    # Dedupe: reruns (--force/--resume/--albums-only) re-append the same rows.
+    local rtmp
+    rtmp=$(mktemp)
+    sort -u "$recovery_file" > "$rtmp" && mv "$rtmp" "$recovery_file"
+    log "  entries recorded in recovery file: $recovery_file"
   fi
   return 0
 }
@@ -460,7 +474,8 @@ validate_albums() {
       log "  validation: album \"$takeout_name\" verified ($e/$e)"
     fi
   done
-  (( a_fail > 0 )) && return 1
+  (( a_fail > 0 )) && log "  WARN: $a_fail album(s) had membership issues (see above)"
+  echo "$a_fail"
   return 0
 }
 
@@ -495,7 +510,7 @@ run_archive() {
       any_media=$(find "$extract_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 | head -c 1)
       if [[ -z "$any_media" ]]; then
         log "no 'Google Photos' directory and no media files — treating as empty archive"
-        jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, albums_processed: 0 }' > "$artifacts/summary.json"
+        jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, media_missing: 0, album_failures: 0, albums_processed: 0 }' > "$artifacts/summary.json"
         rm -rf "$extract_dir"
         mark_done "$base"
         return 0
@@ -510,15 +525,18 @@ run_archive() {
   log "stripping macOS metadata junk (._*, .DS_Store) ..."
   strip_junk "$extract_dir"
 
-  log "applying original capture dates from sidecar JSON ..."
-  apply_sidecar_dates "$gp_dir"
+  # Sidecar dates only matter for upload (CLI reads mtime); skip in albums-only.
+  if (( ALBUMS_ONLY == 0 )); then
+    log "applying original capture dates from sidecar JSON ..."
+    apply_sidecar_dates "$gp_dir"
+  fi
 
   # Empty-archive check: bail early if no media files anywhere.
   local any_media
   any_media=$(find "$gp_dir" -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.gif' -o -iname '*.heic' -o -iname '*.mov' -o -iname '*.mp4' -o -iname '*.cr2' -o -iname '*.nef' -o -iname '*.arw' \) -print0 2>/dev/null | xargs -0 -I {} echo 1 2>/dev/null | head -c 1)
   if [[ -z "$any_media" ]]; then
     log "no media files found — treating as empty archive"
-    jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, albums_processed: 0 }' > "$artifacts/summary.json"
+    jq -n --arg archive "$base" '{ archive: $archive, status: "EMPTY", expected_media: 0, media_missing: 0, album_failures: 0, albums_processed: 0 }' > "$artifacts/summary.json"
     rm -rf "$extract_dir"
     mark_done "$base"
     return 0
@@ -541,59 +559,132 @@ run_archive() {
   # name+sha1, and only processes image/* and video/* (sidecar .json etc. are
   # silently ignored).  Album-folder copies of the same photo are skipped.
   local upload_json="$artifacts/upload.json" rc
-  log "uploading (conflict strategy: skip) ..."
-  "$CLI" photo upload --json -c skip "$gp_dir" > "$upload_json" 2>"$artifacts/upload.err"; rc=$?
-  if (( rc != 0 )); then
-    err "photo upload failed (rc=$rc) — see $artifacts/upload.err"; return 1
-  fi
-  local transferred failed skipped
-  transferred=$(jq '.transferredItems' "$upload_json")
-  skipped=$(jq '.skippedItems' "$upload_json")
-  failed=$(jq '.failedItems' "$upload_json")
-  log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
-  if (( failed > 0 )); then
-    err "upload reported $failed failures: $(jq -c '.failures' "$upload_json")"
-    return 1
-  fi
-
-  # Verify: re-run upload, everything already present.
   local verify_json="$artifacts/upload-verify.json"
-  "$CLI" photo upload --json -c skip "$gp_dir" > "$verify_json" 2>"$artifacts/upload-verify.err"; rc=$?
-  if (( rc != 0 )); then
-    err "verification upload failed (rc=$rc)"; return 1
-  fi
-  local v_transferred v_failed
-  v_transferred=$(jq '.transferredItems' "$verify_json")
-  v_failed=$(jq '.failedItems' "$verify_json")
-  log "verify upload: transferred=$v_transferred failed=$v_failed (expect 0 transferred)"
-  if (( v_failed > 0 )); then
-    err "verify upload reported failures: $(jq -c '.failures' "$verify_json")"
-    return 1
-  fi
-  if (( v_transferred > 0 )); then
-    log "WARN: verify upload transferred $v_transferred (content dedup mismatch) — sha1 validation is authoritative"
-  fi
-
-  # Timeline index (sha1 -> uid, name -> uid).
   local timeline_json="$artifacts/timeline.json" timeline_base="$artifacts/timeline-index"
-  log "fetching photos timeline (sha1 index) ..."
-  "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
-  if (( rc != 0 )); then
-    err "photo timeline failed (rc=$rc)"; return 1
-  fi
-  build_timeline_index "$timeline_json" "$timeline_base"
-  log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+  local transferred=0 skipped=0 failed=0
+  local run_mode="import"
 
-  # Validation 1: every media file present in the timeline.
-  validate_media "$manifest_json" "$timeline_base" "$artifacts" || return 1
+  # --resume: locate the most recent PREVIOUS run's artifacts for this archive.
+  # (This run's artifact dir run-$RUN_TS/$base was just created empty above, so
+  # previous runs must be found under their own run-<ts> directories.)
+  local prev_artifacts=""
+  if (( RESUME )) && (( ALBUMS_ONLY == 0 )); then
+    local d
+    for d in "$LOG_DIR"/run-*/"$base"; do
+      [[ -d "$d" ]] || continue
+      [[ "$d" == "$LOG_DIR/run-$RUN_TS/$base" ]] && continue
+      # only complete artifact dirs qualify (albums-only runs have no upload.json)
+      [[ -s "$d/timeline-index.sha1" ]] || continue
+      [[ -s "$d/timeline-index.name" ]] || continue
+      jq -e '.transferredItems and .skippedItems and .failedItems' "$d/upload.json" >/dev/null 2>&1 || continue
+      # keep the most recently modified qualifying dir
+      if [[ -z "$prev_artifacts" || "$d" -nt "$prev_artifacts" ]]; then
+        prev_artifacts="$d"
+      fi
+    done
+    [[ -z "$prev_artifacts" ]] && log "resume requested but no complete previous artifacts found — full upload"
+  fi
+
+  if (( ALBUMS_ONLY )); then
+    run_mode="albums-only"
+    log "albums-only mode: skipping upload/verify"
+    log "fetching photos timeline (sha1 index) ..."
+    "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo timeline failed (rc=$rc)"; return 1
+    fi
+    build_timeline_index "$timeline_json" "$timeline_base"
+    if [[ ! -s "$timeline_base.sha1" ]]; then
+      err "timeline index is empty — invalid timeline response?"; return 1
+    fi
+    log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+
+  elif [[ -n "$prev_artifacts" ]]; then
+    run_mode="resume"
+    log "resume mode: reusing upload + timeline artifacts from $prev_artifacts"
+    upload_json="$prev_artifacts/upload.json"
+    timeline_base="$prev_artifacts/timeline-index"
+    transferred=$(jq '.transferredItems' "$upload_json")
+    skipped=$(jq '.skippedItems' "$upload_json")
+    failed=$(jq '.failedItems' "$upload_json")
+    log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
+    if (( failed > 0 )); then
+      err "cached upload reported $failed failures — re-run without --resume to retry"
+      return 1
+    fi
+
+  else
+    log "uploading (conflict strategy: skip) ..."
+    "$CLI" photo upload --json -c skip "$gp_dir" > "$upload_json" 2>"$artifacts/upload.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo upload failed (rc=$rc) — see $artifacts/upload.err"; return 1
+    fi
+    transferred=$(jq '.transferredItems' "$upload_json")
+    skipped=$(jq '.skippedItems' "$upload_json")
+    failed=$(jq '.failedItems' "$upload_json")
+    log "upload summary: transferred=$transferred skipped=$skipped failed=$failed"
+    if (( failed > 0 )); then
+      err "upload reported $failed failures: $(jq -c '.failures' "$upload_json")"
+      return 1
+    fi
+
+    # Verify: re-run upload, everything already present.
+    "$CLI" photo upload --json -c skip "$gp_dir" > "$verify_json" 2>"$artifacts/upload-verify.err"; rc=$?
+    if (( rc != 0 )); then
+      err "verification upload failed (rc=$rc)"; return 1
+    fi
+    local v_transferred v_failed
+    v_transferred=$(jq '.transferredItems' "$verify_json")
+    v_failed=$(jq '.failedItems' "$verify_json")
+    log "verify upload: transferred=$v_transferred failed=$v_failed (expect 0 transferred)"
+    if (( v_failed > 0 )); then
+      err "verify upload reported failures: $(jq -c '.failures' "$verify_json")"
+      return 1
+    fi
+    if (( v_transferred > 0 )); then
+      log "WARN: verify upload transferred $v_transferred (content dedup mismatch) — sha1 validation is authoritative"
+    fi
+
+    # Timeline index (sha1 -> uid, name -> uid).
+    log "fetching photos timeline (sha1 index) ..."
+    "$CLI" photo timeline -d --json > "$timeline_json" 2>"$artifacts/timeline.err"; rc=$?
+    if (( rc != 0 )); then
+      err "photo timeline failed (rc=$rc)"; return 1
+    fi
+    build_timeline_index "$timeline_json" "$timeline_base"
+    if [[ ! -s "$timeline_base.sha1" ]]; then
+      err "timeline index is empty — invalid timeline response?"; return 1
+    fi
+    log "timeline indexed: $(wc -l < "$timeline_base.sha1" | tr -d ' ') unique sha1s"
+  fi
+
+  # Albums-only precondition: the archive must actually be uploaded already.
+  # Checked BEFORE validation so a wrong archive doesn't flood the recovery
+  # file — if nothing matches the timeline, album rebuilding is pointless.
+  if (( ALBUMS_ONLY )) && (( expected_media > 0 )); then
+    local found_in_timeline
+    found_in_timeline=$(awk -F '\t' 'NR==FNR { seen[$1]=1; next } seen[$1] { c++ } END { print c+0 }' \
+      "$timeline_base.sha1" <(jq -r '.media[].sha1' "$manifest_json"))
+    if (( found_in_timeline == 0 )); then
+      err "albums-only: none of the $expected_media media files are in the Proton timeline — was this archive ever uploaded?"
+      return 1
+    fi
+  fi
+
+  # Validation 1: every media file present in the timeline (non-fatal).
+  validate_media "$manifest_json" "$timeline_base" "$artifacts" "$RECOVERY_FILE" "$base"
+  local media_missing=0
+  [[ -f "$artifacts/validation-missing.tsv" ]] && media_missing=$(wc -l < "$artifacts/validation-missing.tsv")
 
   # Albums.
   local albums_json="$artifacts/albums-takeout.json"
   discover_albums "$gp_dir" "$albums_json"
   process_albums "$albums_json" "$timeline_base" "$artifacts" || return 1
 
-  # Validation 2: album membership.
-  validate_albums "$artifacts/albums.json" "$artifacts/albums-takeout.json" "$timeline_base" "$artifacts" || return 1
+  # Validation 2: album membership (non-fatal).
+  local album_failures
+  album_failures=$(validate_albums "$artifacts/albums.json" "$artifacts/albums-takeout.json" "$timeline_base" "$artifacts") || true
+  album_failures=${album_failures:-0}
 
   # Summary + state + cleanup.
   local summary="$artifacts/summary.json"
@@ -604,18 +695,24 @@ run_archive() {
     --argjson transferred "$transferred" \
     --argjson skipped "$skipped" \
     --argjson failed "$failed" \
-    --argjson albums_processed "$(jq 'length' "$artifacts/albums.json")" \
+    --arg mode "$run_mode" \
+    --argjson media_missing "$media_missing" \
+    --argjson album_failures "$album_failures" \
+    --argjson albums_processed "$(jq 'length' "$artifacts/albums.json" 2>/dev/null || echo 0)" \
     '{ archive: $archive,
        status: "OK",
+       mode: $mode,
        expected_media: $expected_media,
        expected_unique: $expected_unique,
        uploaded_transferred: $transferred,
        uploaded_skipped: $skipped,
        uploaded_failed: $failed,
+       media_missing: $media_missing,
+       album_failures: $album_failures,
        albums_processed: $albums_processed }' > "$summary"
 
   log "==== $base: SUCCESS ===="
-  if (( KEEP_WORK == 0 )); then
+  if (( KEEP_WORK == 0 )) && (( ALBUMS_ONLY == 0 )); then
     log "cleaning up $extract_dir"
     rm -rf "$extract_dir"
   fi
@@ -634,6 +731,8 @@ main() {
       check|--check) mode="check" ;;
       --force) force=1 ;;
       --keep-work) KEEP_WORK=1 ;;
+      --resume) RESUME=1 ;;
+      --albums-only) ALBUMS_ONLY=1 ;;
       --archive) shift; only="${1:-}"; [[ -z "$only" ]] && { err "--archive requires a name"; return 2; } ;;
       *) err "unknown option: $1"; usage; return 2 ;;
     esac
@@ -647,6 +746,9 @@ main() {
 
   log "gphoto2proton-import: takeout=$TAKEOUT_DIR work=$WORK_DIR logs=$LOG_DIR state=$STATE_DIR"
   log "CLI=$CLI credentials_store=$PROTON_DRIVE_CREDENTIALS_STORE"
+  if (( RESUME )) && (( ALBUMS_ONLY )); then
+    log "WARN: --resume ignored in --albums-only mode"
+  fi
 
   if ! preflight; then return 1; fi
 
@@ -688,7 +790,9 @@ main() {
   mapfile -t archives < <(printf '%s\n' "${archives[@]}" | sort)
   local -a todo=()
   for a in "${archives[@]}"; do
-    if (( force == 0 )) && is_done "$(basename "$a")"; then
+    # --albums-only manages albums for already-imported archives, so it must
+    # reprocess entries that are marked as done.
+    if (( force == 0 )) && (( ALBUMS_ONLY == 0 )) && is_done "$(basename "$a")"; then
       log "skipping $(basename "$a") (already done)"
       continue
     fi

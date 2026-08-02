@@ -377,7 +377,7 @@ main() {
     # --- Trash old (failure here = original untouched, safe to retry later).
     log "  trashing old uid=$uid ..."
     local rc=0
-    "$CLI" trash "/photos/$uid" > "$WORK_DIR/trash-$i.out" 2>&1 || rc=$?
+    "$CLI" filesystem trash "/photos/$uid" > "$WORK_DIR/trash-$i.out" 2>&1 || rc=$?
     if (( rc != 0 )); then
       err "trash failed (rc=$rc) for $fn — original untouched (state: $state_file)"
       fix_fail=$((fix_fail+1)); continue
@@ -386,9 +386,9 @@ main() {
     # --- Permanently delete from trash (failure = recoverable in photos-trash).
     log "  permanently deleting ..."
     rc=0
-    "$CLI" delete "/photos-trash/$uid" > "$WORK_DIR/delete-$i.out" 2>&1 || rc=$?
+    "$CLI" filesystem delete "/photos-trash/$fn" > "$WORK_DIR/delete-$i.out" 2>&1 || rc=$?
     if (( rc != 0 )); then
-      err "delete from trash failed (rc=$rc) for $fn — photo is in photos-trash (uid=$uid); recover with: $CLI untrash /photos-trash/$uid (state: $state_file)"
+      err "delete from trash failed (rc=$rc) for $fn — photo is in photos-trash (uid=$uid); recover with: $CLI filesystem restore /photos-trash/$fn (state: $state_file)"
       fix_fail=$((fix_fail+1)); continue
     fi
 
