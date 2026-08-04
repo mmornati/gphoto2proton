@@ -32,6 +32,7 @@ nav:
       - Overview: scripts/overview.md
       - Quick Start: scripts/quickstart.md
       - Import Script: scripts/import.md
+      - Album Check: scripts/album-check.md
       - Fix Photo Date: scripts/fix-photo-date.md
   - How It Works: how-it-works.md
   - Architecture: architecture.md
