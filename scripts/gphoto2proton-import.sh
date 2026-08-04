@@ -277,6 +277,11 @@ progress_album_done() {
   [[ -f "$file" ]] || return 1
   jq -e --arg n "$name" '.albums | any(.name == $n)' "$file" >/dev/null 2>&1
 }
+progress_album_complete() {
+  local file="$1" name="$2"
+  [[ -f "$file" ]] || return 1
+  jq -e --arg n "$name" '.albums | any(.name == $n and .expected_members == .added_ok)' "$file" >/dev/null 2>&1
+}
 
 progress_album_append() {
   local file="$1" name="$2" uid="$3" expected="$4" matched="$5" ok="$6" tmp
@@ -595,8 +600,15 @@ process_albums() {
     local album_uid=""
     album_uid=$(jq -r --arg n "$name" '.[] | select(.name.value == $n) | .uid' "$existing_json" | head -1)
     if [[ -n "$album_uid" ]]; then
+      if progress_album_complete "$progress" "$name"; then
+        log "    already complete in previous run -- skipping"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      album_pre_existing=1
       log "    exists, reusing uid $album_uid"
     else
+      album_pre_existing=0
       local create_json="$artifacts/album-create-$name.json"
       "$CLI" album create --json "$name" > "$create_json" 2>"$artifacts/album-create-$name.err"; rc=$?
       if (( rc != 0 )); then
@@ -652,7 +664,13 @@ process_albums() {
       log "    added $okc/$((end - start)) photos to \"$name\" ($fail_total failures so far)"
       start=$end
     done
-    (( fail_total > 0 )) && { err "album \"$name\": $fail_total member adds failed"; return 1; }
+    if (( fail_total > 0 )); then
+      if (( album_pre_existing )); then
+        log "    WARN: $fail_total member adds failed (likely already in album) -- continuing"
+      else
+        err "album \"$name\": $fail_total member adds failed"; return 1
+      fi
+    fi
 
     local album_artifacts="$artifacts/album-$name.json"
     jq -n --arg name "$name" --arg uid "$album_uid" --argjson expected "$nmembers" --argjson added "${#uid_list[@]}" --argjson ok "$ok_total" \
@@ -722,18 +740,30 @@ validate_albums() {
     echo 0
     return 0
   fi
+  # Join the two lists by album NAME, not by array index: albums.json is in
+  # processing/creation order while albums-takeout.json is in discovery order,
+  # so index pairing compares each Proton album against the WRONG expected
+  # member list and reports bogus "N/N expected members not in album" errors.
+  local lookup takeout_by_name
+  lookup=$(jq -c 'map({key: .name, value: .}) | from_entries' "$takeout_json")
+  if [[ -z "$lookup" ]]; then
+    err "could not build takeout album name lookup"; return 1
+  fi
   local idx uid takeout_name expected_shas actual_shas rc
   for (( idx = 0; idx < n; idx++ )); do
     uid=$(jq -r --argjson i "$idx" '.[$i].uid' "$result_json")
-    takeout_name=$(jq -r --argjson i "$idx" '.[$i].name' "$takeout_json")
+    takeout_name=$(jq -r --argjson i "$idx" '.[$i].name' "$result_json")
     local actual_json="$artifacts/album-photos-$uid.json"
     "$CLI" album photos -d --json "/albums/$uid" > "$actual_json" 2>"$artifacts/album-photos-$uid.err"; rc=$?
     if (( rc != 0 )); then
       err "album photos failed for $uid"; a_fail=$((a_fail + 1)); continue
     fi
-    expected_shas=$(jq -c --argjson i "$idx" '
-      .[$i].members | map(select(.sha1 != "" and .sha1 != "0")) | map(.sha1) | unique
-    ' "$takeout_json")
+    if ! jq -e --arg n "$takeout_name" 'has($n)' <<<"$lookup" >/dev/null; then
+      err "album \"$takeout_name\" not found in takeout album list"; a_fail=$((a_fail + 1)); continue
+    fi
+    expected_shas=$(jq -c --arg n "$takeout_name" '
+      .[$n].members | map(select(.sha1 != "" and .sha1 != "0")) | map(.sha1) | unique
+    ' <<<"$lookup")
     actual_shas=$(jq -c '[.[] | select(.activeRevision.claimedDigests.sha1 != null) | .activeRevision.claimedDigests.sha1] | unique' "$actual_json")
     local e a
     e=$(jq 'length' <<<"$expected_shas")
