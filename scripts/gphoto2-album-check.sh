@@ -21,6 +21,9 @@
 #   --verbose      Also list individual member files (matched and missing)
 #   --list-albums  List all albums found on both sides (fast, no deep check)
 #   --json         Output results as JSON (machine-readable)
+#   --cached-run TS  Use cached data from a previous run (e.g. 20260803-215915)
+#                    instead of querying the live Proton CLI. Useful when the
+#                    import is in progress and the CLI is busy.
 #   -h, --help     Show this help
 #
 # Environment:
@@ -50,6 +53,7 @@ MODE_MISSING=0
 MODE_VERBOSE=0
 MODE_LIST=0
 MODE_JSON=0
+CACHED_RUN=""
 ALBUM_FILTER=""
 
 # ---- helpers ----------------------------------------------------------------
@@ -68,16 +72,27 @@ while (( $# > 0 )); do
     --verbose)      MODE_VERBOSE=1; shift ;;
     --list-albums)  MODE_LIST=1; shift ;;
     --json)         MODE_JSON=1; shift ;;
+    --cached-run)   CACHED_RUN="$2"; shift 2 ;;
     -h|--help)      usage ;;
     *)              ALBUM_FILTER="$1"; shift ;;
   esac
 done
 
-# ---- auth check -------------------------------------------------------------
-"$CLI" album list --json >/dev/null 2>/dev/null || {
-  err "proton-drive is not authenticated. Run: $CLI auth login"
-  exit 1
-}
+# ---- auth check (skip in cached mode) --------------------------------------
+CACHE_DIR=""
+if [[ -n "$CACHED_RUN" ]]; then
+  CACHE_DIR="$LOG_DIR/run-$CACHED_RUN"
+  if [[ ! -d "$CACHE_DIR" ]]; then
+    err "cached run directory not found: $CACHE_DIR"
+    exit 1
+  fi
+  warn "using cached data from run-$CACHED_RUN (live Proton CLI not queried)"
+else
+  "$CLI" album list --json >/dev/null 2>/dev/null || {
+    err "proton-drive is not authenticated. Run: $CLI auth login"
+    exit 1
+  }
+fi
 
 # =============================================================================
 # STEP 1 — Collect expected album members from albums-takeout.json files
@@ -114,9 +129,27 @@ TAKEOUT_COUNT=${#EXPECTED_JSON[@]}
 # =============================================================================
 # STEP 2 — Fetch Proton albums
 # =============================================================================
-PROTON_JSON=$("$CLI" album list --json 2>/dev/null) || {
-  err "album list failed"; exit 1
-}
+if [[ -n "$CACHED_RUN" ]]; then
+  PROTON_JSON="[]"
+  for aj in "$CACHE_DIR"/*/albums-existing.json; do
+    [[ -f "$aj" ]] || continue
+    parsed=$(jq -c '[.[] | {uid, name: .name.value}]' "$aj" 2>/dev/null) || continue
+    PROTON_JSON=$(jq -n --argjson a "$PROTON_JSON" --argjson b "$parsed" '$a + $b')
+  done
+  for pj in "$STATE_DIR"/progress/*.json; do
+    [[ -f "$pj" ]] || continue
+    while IFS=$'\t' read -r pname puid; do
+      [[ -z "$pname" ]] && continue
+      if ! jq -e --arg n "$pname" '.[] | select(.name == $n) | any' <<< "$PROTON_JSON" >/dev/null 2>&1; then
+        PROTON_JSON=$(jq --arg n "$pname" --arg u "$puid" '. + [{uid: $u, name: $n}]' <<< "$PROTON_JSON")
+      fi
+    done < <(jq -r '.albums[] | "\(.name)\t\(.uid)"' "$pj" 2>/dev/null)
+  done
+else
+  PROTON_JSON=$("$CLI" album list --json 2>/dev/null) || {
+    err "album list failed"; exit 1
+  }
+fi
 PROTON_COUNT=$(jq 'length' <<< "$PROTON_JSON")
 
 declare -A P_UID P_NAME
@@ -146,15 +179,29 @@ if (( MODE_LIST )); then list_albums; fi
 # =============================================================================
 # STEP 3 — Compare albums
 # =============================================================================
-# build union of album names from both sides
+# build union of album names from both sides, filtered early for performance
 ALL_NAMES=()
-for n in "${!EXPECTED_JSON[@]}"; do ALL_NAMES+=("$n"); done
+for n in "${!EXPECTED_JSON[@]}"; do
+  [[ -n "$ALBUM_FILTER" ]] && ! grep -qi "$ALBUM_FILTER" <<< "$n" && continue
+  ALL_NAMES+=("$n")
+done
 for n in "${!P_UID[@]}"; do
+  [[ -n "$ALBUM_FILTER" ]] && ! grep -qi "$ALBUM_FILTER" <<< "$n" && continue
   skip=0
   for e in "${ALL_NAMES[@]}"; do [[ "$e" == "$n" ]] && skip=1 && break; done
   (( skip == 0 )) && ALL_NAMES+=("$n")
 done
 IFS=$'\n' ALL_NAMES=($(sort -u <<< "${ALL_NAMES[*]}")); unset IFS
+
+# --cached-run: pre-build uid → album-photos file mapping for fast lookup
+declare -A CACHED_PHOTO_FILE
+if [[ -n "$CACHED_RUN" ]]; then
+  for ap in "$CACHE_DIR"/*/album-photos-*.json; do
+    [[ -f "$ap" ]] || continue
+    uid_from_file=$(basename "$ap" | sed 's/^album-photos-//; s/\.json$//')
+    CACHED_PHOTO_FILE["$uid_from_file"]="$ap"
+  done
+fi
 
 # output accumulators for JSON mode
 JSON_RESULTS="["
@@ -167,11 +214,13 @@ check_album() {
 
   [[ -n "$ALBUM_FILTER" ]] && ! grep -qi "$ALBUM_FILTER" <<< "$name" && return
 
-  # expected count
-  local e_cnt=0 e_shas="[]" name_lookup="{}"
+  # expected count (unique shas; raw member count may include duplicates across
+  # repeated import runs, so display the unique figure for a fair comparison)
+  local e_cnt=0 e_raw=0 e_shas="[]" name_lookup="{}"
   if [[ -n "$exp" ]]; then
-    e_cnt=$(jq 'length' <<< "$exp")
+    e_raw=$(jq 'length' <<< "$exp")
     e_shas=$(jq '[.[] | .sha1 | select(. != "" and . != "0")] | unique' <<< "$exp" 2>/dev/null || echo "[]")
+    e_cnt=$(jq 'length' <<< "$e_shas")
     name_lookup=$(jq '[.[] | {key: .sha1, value: .filename}] | from_entries' <<< "$exp" 2>/dev/null || echo "{}")
   fi
 
@@ -197,10 +246,20 @@ check_album() {
 
   # ----- Fetch actual members from Proton ------------------------------------
   local actual
-  actual=$("$CLI" album photos -d --json "/albums/$puid" 2>/dev/null) || {
-    warn "album photos failed for \"$name\" (uid=$puid)"
-    return
-  }
+  if [[ -n "$CACHED_RUN" ]]; then
+    local cached_file="${CACHED_PHOTO_FILE[$puid]:-}"
+    if [[ -n "$cached_file" ]]; then
+      actual=$(cat "$cached_file")
+    else
+      actual="[]"
+      warn "no cached album-photos for \"$name\" (uid=$puid) in run-$CACHED_RUN"
+    fi
+  else
+    actual=$("$CLI" album photos -d --json "/albums/$puid" 2>/dev/null) || {
+      warn "album photos failed for \"$name\" (uid=$puid)"
+      return
+    }
+  fi
 
   local a_cnt a_shas
   a_cnt=$(jq 'length' <<< "$actual")
