@@ -28,6 +28,7 @@ detect-album-conflicts.sh [options]
 | `-v, --verbose` | List each conflicting file per album |
 | `--summary-only` | Just show per-album conflict counts (no details) |
 | `--json` | Output results as JSON (machine-readable) |
+| `--cache-dir DIR` | Cache album photo JSONs in DIR for offline reuse on subsequent runs (only album list fetched live when cache is populated) |
 | `--year YYYY` | Only check albums with this leading year |
 | `--min-year YYYY` | Only check albums with year >= this (skip older) |
 | `--max-conflict PCT` | If conflict % exceeds this, warn (default: 20) |
@@ -53,6 +54,9 @@ For each album:
 2. **Filter** — if `--year` or `--min-year` was given, albums not matching the
    filter are skipped (without an API call for albums with a year in the name).
 3. **Fetch photos** — `proton-drive album photos -d --json` for the album.
+   If `--cache-dir DIR` is given, each album's JSON is saved to `DIR/<uid>.json`.
+   On subsequent runs, cache files are read instead of making API calls (saves
+   **~7 minutes** on a full scan of 450 albums).
 4. **Detect conflicts** — any photo whose `captureTime` doesn't start with the
    album year is flagged. Photos with null/empty captureTime are counted
    separately.
@@ -79,6 +83,38 @@ in any case. A word-boundary check prevents false matches (e.g. "mai" inside
 
 When a day number precedes the month name (e.g. "28 Mai"), that day is used.
 Otherwise the 15th of the month is used as a neutral default.
+
+---
+
+## Caching
+
+With 450+ albums and 63,000+ photos, scanning all albums live takes **~7
+minutes**, executing one `proton-drive album photos` API call per album.
+
+The `--cache-dir DIR` flag caches each album's JSON response to a local file.
+On subsequent runs, cache files are read instead of API calls — the scan
+completes in **~5 seconds**.
+
+### How to use
+
+```bash
+# First run: populate the cache from the API
+./detect-album-conflicts.sh --cache-dir ~/photo-cache --fix-tsv fixes-all.tsv
+
+# Subsequent runs: reuse the cache (no API calls for photo data)
+./detect-album-conflicts.sh --cache-dir ~/photo-cache --year 2025 --summary-only
+```
+
+To refresh the cache (e.g. after uploading new photos), just delete the cache
+directory:
+
+```bash
+rm -rf ~/photo-cache
+./detect-album-conflicts.sh --cache-dir ~/photo-cache --fix-tsv fixes-all.tsv
+```
+
+The cache directory stores one JSON file per album (uid-based filename).
+Total size for 450 albums: **~129 MB**.
 
 ---
 
@@ -152,19 +188,43 @@ Then fix with:
 
 ## Typical workflow
 
+### Local machine
+
 ```bash
 # 1. Scan and generate fix TSV
-./detect-album-conflicts.sh --fix-tsv conflicts-2025.tsv --year 2025
+./detect-album-conflicts.sh --cache-dir ~/photo-cache --fix-tsv conflicts.tsv
 
 # 2. Review the output
-less conflicts-2025.tsv
+less conflicts.tsv
 
 # 3. Apply fixes (dry-run first)
-./fix-photo-date.sh --file conflicts-2025.tsv --dry-run
-./fix-photo-date.sh --file conflicts-2025.tsv --yes
+./fix-photo-date.sh --file conflicts.tsv --dry-run
+./fix-photo-date.sh --file conflicts.tsv --yes
 
-# 4. Re-scan to verify no remaining conflicts
-./detect-album-conflicts.sh --year 2025 --summary-only
+# 4. Re-scan from cache to verify
+./detect-album-conflicts.sh --cache-dir ~/photo-cache --summary-only
+```
+
+### Server (cache then fix)
+
+```bash
+# 1. First run: populate cache + generate fix TSV (takes ~7 min)
+ssh server01
+cd ~/gphoto2proton
+./detect-album-conflicts.sh --cache-dir ~/gphoto2proton/photo-cache \
+  --fix-tsv ~/gphoto2proton/fixes-all.tsv
+
+# 2. Subsequent runs: instant (from cache)
+./detect-album-conflicts.sh --cache-dir ~/gphoto2proton/photo-cache \
+  --year 2025 --summary-only
+
+# 3. Fix videos with wrong dates
+./fix-photo-date.sh --file ~/gphoto2proton/fixes-all.tsv --yes
+
+# 4. Refresh cache after fixing and re-check
+rm -rf ~/gphoto2proton/photo-cache
+./detect-album-conflicts.sh --cache-dir ~/gphoto2proton/photo-cache \
+  --summary-only
 ```
 
 ---

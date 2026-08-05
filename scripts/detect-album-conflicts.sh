@@ -22,6 +22,9 @@
 #   -v, --verbose        List each conflicting file per album
 #   --summary-only       Just show per-album conflict counts (no details)
 #   --json               Output results as JSON (machine-readable)
+#   --cache-dir DIR      Cache album photo JSONs in DIR for offline reuse on
+#                        subsequent runs (only album list fetched live when
+#                        cache is populated)
 #   --year YYYY          Only check albums with this leading year
 #   --min-year YYYY      Only check albums with year >= this (skip older)
 #   --max-conflict PCT   If conflict % exceeds this, warn about album-wide issue
@@ -38,6 +41,8 @@
 #   ./detect-album-conflicts.sh --summary-only                # Just conflict counts
 #   ./detect-album-conflicts.sh --fix-tsv fixes.tsv           # Generate fix file
 #   ./detect-album-conflicts.sh -v --year 2025                # Detailed for 2025
+#   ./detect-album-conflicts.sh --cache-dir ~/photo-cache     # Cache + scan (first run)
+#   ./detect-album-conflicts.sh --cache-dir ~/photo-cache     # Offline scan (subsequent)
 #   ./detect-album-conflicts.sh --json > report.json          # Machine-readable
 #
 set -euo pipefail
@@ -51,6 +56,7 @@ MODE_SUMMARY=0
 MODE_JSON=0
 MODE_DRY_RUN=0
 FIX_TSV=""
+CACHE_DIR=""
 YEAR_FILTER=""
 MIN_YEAR=""
 MAX_CONFLICT_PCT=20
@@ -71,6 +77,7 @@ while (( $# > 0 )); do
     -v|--verbose)    MODE_VERBOSE=1 ;;
     --summary-only)  MODE_SUMMARY=1 ;;
     --json)          MODE_JSON=1 ;;
+    --cache-dir)     shift; CACHE_DIR="${1:-}"; [[ -z "$CACHE_DIR" ]] && { err "--cache-dir requires a path"; usage; } ;;
     --year)          shift; YEAR_FILTER="${1:-}"; [[ -z "$YEAR_FILTER" ]] && { err "--year requires YYYY"; usage; } ;;
     --min-year)      shift; MIN_YEAR="${1:-}"; [[ -z "$MIN_YEAR" ]] && { err "--min-year requires YYYY"; usage; } ;;
     --max-conflict)  shift; MAX_CONFLICT_PCT="${1:-20}" ;;
@@ -163,7 +170,7 @@ ALBUM_YEAR=""
 
 detect_album_conflicts() {
   local name="$1" uid="$2"
-  local album_json conflict_json missing_json
+  local album_json="" conflict_json="" missing_json=""
 
   CONFLICT_FILES=(); CONFLICT_DATES=(); CONFLICT_CURRENT=()
   MISSING_CAPTURE_FILES=()
@@ -176,9 +183,24 @@ detect_album_conflicts() {
     [[ -n "$MIN_YEAR" && "$ALBUM_YEAR" -lt "$MIN_YEAR" ]] && return 0
   fi
 
-  album_json=$("$CLI" album photos -d --json "/albums/$uid" 2>/dev/null) || {
-    warn "failed to fetch photos for album \"$name\""; return 1
-  }
+  local cache_file=""
+  if [[ -n "$CACHE_DIR" ]]; then
+    cache_file="$CACHE_DIR/$(echo "$uid" | sed 's/\//_/g').json"
+    if [[ -f "$cache_file" ]]; then
+      album_json=$(<"$cache_file")
+      log "cache hit for album \"$name\""
+    fi
+  fi
+
+  if [[ -z "$album_json" ]]; then
+    album_json=$("$CLI" album photos -d --json "/albums/$uid" 2>/dev/null) || {
+      warn "failed to fetch photos for album \"$name\""; return 1
+    }
+    if [[ -n "$CACHE_DIR" ]]; then
+      mkdir -p "$CACHE_DIR"
+      echo "$album_json" > "$cache_file"
+    fi
+  fi
 
   PHOTO_TOTAL=$(jq 'length' <<< "$album_json")
 
