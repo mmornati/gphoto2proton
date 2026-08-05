@@ -7,6 +7,9 @@
 # *expected* member set, then queries the live Proton Drive API via the
 # `proton-drive` CLI for the *actual* member set, and diffs them.
 #
+# Members are matched by filename basename (extension-insensitive), so photos
+# converted during import (e.g. NEF -> JPG by --convert-raw) still align.
+#
 # Authentication: same as gphoto2proton-import.sh — uses the `pass` secret
 # store via PROTON_DRIVE_CREDENTIALS_STORE=pass. Run `proton-drive auth login`
 # if the session is lost.
@@ -214,14 +217,15 @@ check_album() {
 
   [[ -n "$ALBUM_FILTER" ]] && ! grep -qi "$ALBUM_FILTER" <<< "$name" && return
 
-  # expected count (unique shas; raw member count may include duplicates across
-  # repeated import runs, so display the unique figure for a fair comparison)
-  local e_cnt=0 e_raw=0 e_shas="[]" name_lookup="{}"
+  # expected members: unique by filename basename (extension-insensitive), so
+  # photos converted during import (NEF -> JPG) still align. Raw member count
+  # may include duplicates across repeated import runs; display unique figure.
+  local e_cnt=0 e_raw=0 e_keys="[]" key_lookup="{}"
   if [[ -n "$exp" ]]; then
     e_raw=$(jq 'length' <<< "$exp")
-    e_shas=$(jq '[.[] | .sha1 | select(. != "" and . != "0")] | unique' <<< "$exp" 2>/dev/null || echo "[]")
-    e_cnt=$(jq 'length' <<< "$e_shas")
-    name_lookup=$(jq '[.[] | {key: .sha1, value: .filename}] | from_entries' <<< "$exp" 2>/dev/null || echo "{}")
+    e_keys=$(jq '[.[] | select(.filename != null and .filename != "") | .filename] | unique | map(split("/") | last | sub("\\.[^.]*$";"") | ascii_downcase) | unique' <<< "$exp" 2>/dev/null || echo "[]")
+    e_cnt=$(jq 'length' <<< "$e_keys")
+    key_lookup=$(jq '[.[] | select(.filename != null and .filename != "") | .filename] | unique | map({key: (split("/") | last | sub("\\.[^.]*$";"") | ascii_downcase), value: .}) | group_by(.key) | map(.[0]) | from_entries' <<< "$exp" 2>/dev/null || echo "{}")
   fi
 
   # ----- Missing on Proton ---------------------------------------------------
@@ -261,24 +265,18 @@ check_album() {
     }
   fi
 
-  local a_cnt a_shas
+  local a_cnt a_keys akey_lookup
   a_cnt=$(jq 'length' <<< "$actual")
-  a_shas=$(jq '[.[] | select(.activeRevision.claimedDigests.sha1 != null) | .activeRevision.claimedDigests.sha1] | unique' <<< "$actual" 2>/dev/null || echo "[]")
+  a_keys=$(jq '[.[] | select(.name.value != null) | .name.value] | unique | map(split("/") | last | sub("\\.[^.]*$";"") | ascii_downcase) | unique' <<< "$actual" 2>/dev/null || echo "[]")
+  akey_lookup=$(jq '[.[] | select(.name.value != null) | .name.value] | unique | map({key: (split("/") | last | sub("\\.[^.]*$";"") | ascii_downcase), value: .}) | group_by(.key) | map(.[0]) | from_entries' <<< "$actual" 2>/dev/null || echo "{}")
 
-  local miss_shas="[]" miss_cnt=0
-  local extra_shas="[]" extra_cnt=0
-
-  if (( e_cnt > 0 )); then
-    miss_shas=$(jq -n --argjson e "$e_shas" --argjson a "$a_shas" \
-      '[$e[] | select(. as $x | $a | index($x) | not)]' 2>/dev/null || echo "[]")
-    miss_cnt=$(jq 'length' <<< "$miss_shas")
-  fi
-
-  if (( a_cnt > 0 )); then
-    extra_shas=$(jq -n --argjson a "$a_shas" --argjson e "$e_shas" \
-      '[$a[] | select(. as $x | $e | index($x) | not)]' 2>/dev/null || echo "[]")
-    extra_cnt=$(jq 'length' <<< "$extra_shas")
-  fi
+  local miss_json extra_json miss_cnt=0 extra_cnt=0
+  miss_json=$(jq -cn --argjson e "$e_keys" --argjson a "$a_keys" \
+    '[$e[] | select(. as $x | $a | index($x) | not) | {key: .}]' 2>/dev/null || echo "[]")
+  extra_json=$(jq -cn --argjson a "$a_keys" --argjson e "$e_keys" \
+    '[$a[] | select(. as $x | $e | index($x) | not) | {key: .}]' 2>/dev/null || echo "[]")
+  miss_cnt=$(jq 'length' <<< "$miss_json" 2>/dev/null)
+  extra_cnt=$(jq 'length' <<< "$extra_json" 2>/dev/null)
 
   local is_ok=0
   (( miss_cnt == 0 && extra_cnt == 0 )) && is_ok=1
@@ -288,14 +286,14 @@ check_album() {
   # ---- resolve filenames ----------------------------------------------------
   local miss_files="[]"
   if (( miss_cnt > 0 )); then
-    miss_files=$(jq -n --argjson s "$miss_shas" --argjson l "$name_lookup" \
-      '[$s[] | {sha1: ., filename: ($l[.] // "unknown")}]' 2>/dev/null || echo "[]")
+    miss_files=$(jq -n --argjson m "$miss_json" --argjson l "$key_lookup" \
+      '[$m[] | {key: .key, filename: ($l[.key] // "unknown")}]' 2>/dev/null || echo "[]")
   fi
 
   local extra_files="[]"
   if (( extra_cnt > 0 )); then
-    extra_files=$(jq -n --argjson a "$actual" --argjson s "$extra_shas" \
-      '[$a[] | select(.activeRevision.claimedDigests.sha1 as $x | $s | index($x)) | {sha1: .activeRevision.claimedDigests.sha1, filename: .name.value}]' 2>/dev/null || echo "[]")
+    extra_files=$(jq -n --argjson x "$extra_json" --argjson l "$akey_lookup" \
+      '[$x[] | {key: .key, filename: ($l[.key] // "unknown")}]' 2>/dev/null || echo "[]")
   fi
 
   # ---- JSON output ----------------------------------------------------------
@@ -322,15 +320,15 @@ check_album() {
   echo "       Missing: $miss_cnt  |  Extra: $extra_cnt"
 
   if (( MODE_VERBOSE && miss_cnt > 0 )); then
-    echo "       Missing files (sha1 -> filename):"
-    jq -r '.[] | "         \(.sha1) -> \(.filename)"' <<< "$miss_files" 2>/dev/null | head -20
+    echo "       Missing files (basename -> takeout filename):"
+    jq -r '.[] | "         \(.key) -> \(.filename)"' <<< "$miss_files" 2>/dev/null | head -20
     local mmore
     mmore=$(jq 'length' <<< "$miss_files" 2>/dev/null)
     (( mmore > 20 )) && echo "         ... and $((mmore - 20)) more"
   fi
   if (( MODE_VERBOSE && extra_cnt > 0 )); then
-    echo "       Extra files (sha1 -> filename):"
-    jq -r '.[] | "         \(.sha1) -> \(.filename)"' <<< "$extra_files" 2>/dev/null | head -20
+    echo "       Extra files (basename -> proton filename):"
+    jq -r '.[] | "         \(.key) -> \(.filename)"' <<< "$extra_files" 2>/dev/null | head -20
     local emore
     emore=$(jq 'length' <<< "$extra_files" 2>/dev/null)
     (( emore > 20 )) && echo "         ... and $((emore - 20)) more"
