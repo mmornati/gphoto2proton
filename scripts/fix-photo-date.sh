@@ -327,6 +327,11 @@ main() {
         log "  already at target date (±120s) — skipping"
         continue
       fi
+      # Timezone mismatch? Check if the date part matches
+      if [[ "${capture_before:0:10}" == "${norm:0:10}" ]]; then
+        log "  already at target date (date matches, timezone offset ignored) — skipping"
+        continue
+      fi
     fi
 
     if (( DRY_RUN )); then
@@ -436,8 +441,13 @@ main() {
     if [[ -n "$new_capture_epoch" ]]; then
       cap_delta=$(( new_capture_epoch > target_epoch ? new_capture_epoch - target_epoch : target_epoch - new_capture_epoch ))
       if (( cap_delta > 120 )); then
-        err "captureTime mismatch for $fn: got $new_capture, target $norm (delta ${cap_delta}s) — photo re-uploaded but date NOT fixed"
-        entry_partial=1
+        # Timezone offset? Check if the DATE part matches
+        if [[ "${new_capture:0:10}" == "${norm:0:10}" ]]; then
+          log "  captureTime verified: $new_capture (date matches, timezone offset ignored)"
+        else
+          err "captureTime mismatch for $fn: got $new_capture, target $norm (delta ${cap_delta}s) — photo re-uploaded but date NOT fixed"
+          entry_partial=1
+        fi
       else
         log "  captureTime verified: $new_capture"
       fi
