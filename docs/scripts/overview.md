@@ -71,6 +71,7 @@ flowchart TD
 |---|---|
 | [`gphoto2proton-import.sh`](import.md) | Full import pipeline: extract → upload → verify → albums → validate → cleanup. Resumable per step, supports RAW conversion and recovery reprocessing. |
 | [`fix-photo-date.sh`](fix-photo-date.md) | Fix the capture time of already-uploaded Proton Photos (typically videos that got the archive extraction date instead of the recording date). |
+| [`detect-album-conflicts.sh`](detect-album-conflicts.md) | Scan all albums for photos with wrong capture times — outputs a TSV ready for `fix-photo-date.sh`. |
 
 Both scripts talk to the **official `proton-drive` CLI** and reuse its
 authenticated session from the `pass` secret store — no Proton API
@@ -83,3 +84,4 @@ credentials needed.
 - [Quick Start](quickstart.md) — get the import pipeline running in minutes
 - [Import Script Reference](import.md) — every flag, env var, and pipeline step
 - [Fix Photo Date Reference](fix-photo-date.md) — fix wrong capture dates
+- [Detect Album Conflicts Reference](detect-album-conflicts.md) — find albums with date mismatches
