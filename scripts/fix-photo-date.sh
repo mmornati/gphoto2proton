@@ -32,7 +32,12 @@
 #   Date only             2016-10-15        (time defaults to 12:00:00)
 #
 # Usage:
-#   fix-photo-date.sh --file fixes.tsv [--dry-run] [--yes]
+#   fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--dry-run] [--yes]
+#
+# The --album-cache DIR option points at the per-album JSON cache produced by
+# detect-album-conflicts.sh. The timeline's photo.albums field is often empty,
+# so album membership is recovered from these cache files instead. DIR should
+# contain one <album-uid>.json file per album.
 #
 set -euo pipefail
 
@@ -45,6 +50,7 @@ RUN_LOG="/dev/null"
 WORK_DIR=""
 DRY_RUN=0
 YES=0
+ALBUM_CACHE=""
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN_LOG"; }
 err() { echo "[$(date +%H:%M:%S)] ERROR: $*" | tee -a "$RUN_LOG" >&2; }
@@ -57,10 +63,12 @@ Usage:
   fix-photo-date.sh -f fixes.tsv [--dry-run] [--yes]
 
 Options:
-  -f, --file     TSV input file (filename<TAB>date) — required
-  -n, --dry-run  Read-only: show what would be done
-  -y, --yes      Skip confirmation prompt
-  -h, --help     Show this help
+  -f, --file         TSV input file (filename<TAB>date) — required
+  -a, --album-cache  DIR with per-album JSON cache (from detect-album-conflicts.sh)
+                     used to recover album membership when the timeline lacks it
+  -n, --dry-run      Read-only: show what would be done
+  -y, --yes          Skip confirmation prompt
+  -h, --help         Show this help
 
 Naive datetimes use the server's timezone; set TZ=... to override.
 EOF
@@ -196,6 +204,7 @@ main() {
       -f|--file) shift; file="${1:-}"; [[ -z "$file" ]] && { err "--file requires a value"; usage; return 2; } ;;
       -n|--dry-run) DRY_RUN=1 ;;
       -y|--yes) YES=1 ;;
+      -a|--album-cache) shift; ALBUM_CACHE="${1:-}"; [[ -z "$ALBUM_CACHE" ]] && { err "--album-cache requires a path"; usage; return 2; } ;;
       *) err "unknown: $1"; usage; return 2 ;;
     esac
     shift
@@ -289,6 +298,33 @@ main() {
   fi
 
   mkdir -p "$WORK_DIR"
+
+  # --- Build reverse album index from --album-cache (if provided).
+  # Maps each filename to the list of album UIDs containing it.
+  local album_index="$WORK_DIR/.album-index.json"
+  if [[ -n "$ALBUM_CACHE" && -d "$ALBUM_CACHE" ]]; then
+    log "building album index from $ALBUM_CACHE ..."
+    local tmp_index="$WORK_DIR/.album-index-raw.json"
+    : > "$tmp_index"
+    find "$ALBUM_CACHE" -name '*.json' -exec sh -c '
+      for f; do
+        auid=$(basename "$f" .json)
+        jq -c --arg a "$auid" ".[] | {name: .name.value, album: \$a}" "$f" 2>/dev/null
+      done
+    ' _ {} + >> "$tmp_index"
+    # Group by filename into {name, albums: [uids...]}
+    jq -s '
+      group_by(.name) | map({
+        name: .[0].name,
+        albums: [.[].album]
+      })
+    ' "$tmp_index" > "$album_index"
+    rm -f "$tmp_index"
+    local idx_count
+    idx_count=$(jq 'length' "$album_index")
+    log "album index built: $idx_count filenames indexed"
+  fi
+
   local total=${#filenames[@]} fix_ok=0 fix_fail=0 fix_partial=0
 
   for (( i = 0; i < total; i++ )); do
@@ -302,6 +338,15 @@ main() {
     local uid sha1_before albums_csv capture_before
     uid=$(photo_field "$timeline_pre" "$fn" ".uid")
     albums_csv=$(albums_csv_for "$timeline_pre" "$fn")
+    # Fallback: timeline often lacks photo.albums; use cache index if available
+    if [[ -z "$albums_csv" && -f "$album_index" ]]; then
+      local cache_albums
+      cache_albums=$(jq -r --arg f "$fn" 'first(.[] | select(.name == $f) | .albums // []) | join(",")' "$album_index" 2>/dev/null || echo "")
+      if [[ -n "$cache_albums" ]]; then
+        albums_csv="$cache_albums"
+        log "  album membership recovered from cache: $albums_csv"
+      fi
+    fi
     sha1_before=$(photo_field "$timeline_pre" "$fn" "(.activeRevision.claimedDigests.sha1 // \"\")")
     capture_before=$(photo_field "$timeline_pre" "$fn" "(.photo.captureTime // \"\")")
 
