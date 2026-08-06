@@ -161,7 +161,7 @@ default_video_date() {
 # ---------------------------------------------------------------------------
 # Per-album detection. Populates global vars below.
 # ---------------------------------------------------------------------------
-declare -a CONFLICT_FILES=() CONFLICT_DATES=() CONFLICT_CURRENT=()
+declare -a CONFLICT_FILES=() CONFLICT_DATES=() CONFLICT_CURRENT=() CONFLICT_UIDS=()
 declare -a MISSING_CAPTURE_FILES=()
 CONFLICT_COUNT=0
 MISSING_CAPTURE_COUNT=0
@@ -172,7 +172,7 @@ detect_album_conflicts() {
   local name="$1" uid="$2"
   local album_json="" conflict_json="" missing_json=""
 
-  CONFLICT_FILES=(); CONFLICT_DATES=(); CONFLICT_CURRENT=()
+  CONFLICT_FILES=(); CONFLICT_DATES=(); CONFLICT_CURRENT=(); CONFLICT_UIDS=()
   MISSING_CAPTURE_FILES=()
   CONFLICT_COUNT=0; MISSING_CAPTURE_COUNT=0; PHOTO_TOTAL=0; ALBUM_YEAR=""
 
@@ -218,11 +218,11 @@ detect_album_conflicts() {
     [[ -n "$MIN_YEAR" && "$ALBUM_YEAR" -lt "$MIN_YEAR" ]] && return 0
   fi
 
-  conflict_json=$(jq -c --arg y "$ALBUM_YEAR" '
+    conflict_json=$(jq -c --arg y "$ALBUM_YEAR" '
     [.[] | select(
       .photo.captureTime != null and .photo.captureTime != "" and
       (.photo.captureTime | startswith($y + "-") | not)
-    ) | {name: .name.value, captureTime: .photo.captureTime}]
+    ) | {name: .name.value, captureTime: .photo.captureTime, nodeUid: .uid}]
   ' <<< "$album_json")
 
   missing_json=$(jq -c '
@@ -232,16 +232,17 @@ detect_album_conflicts() {
   CONFLICT_COUNT=$(jq 'length' <<< "$conflict_json")
   MISSING_CAPTURE_COUNT=$(jq 'length' <<< "$missing_json")
 
-  CONFLICT_FILES=(); CONFLICT_DATES=(); CONFLICT_CURRENT=()
+  CONFLICT_FILES=(); CONFLICT_DATES=(); CONFLICT_CURRENT=(); CONFLICT_UIDS=()
   MISSING_CAPTURE_FILES=()
 
   if [[ -n "$FIX_TSV" || MODE_VERBOSE -eq 1 ]]; then
-    while IFS=$'\t' read -r fn ct; do
+    while IFS=$'\t' read -r fn ct uid; do
       [[ -z "$fn" ]] && continue
       CONFLICT_FILES+=("$fn")
       CONFLICT_CURRENT+=("$ct")
+      CONFLICT_UIDS+=("$uid")
       CONFLICT_DATES+=("$(default_video_date "$ALBUM_YEAR" "$name")")
-    done < <(jq -r '.[] | "\(.name)\t\(.captureTime)"' <<< "$conflict_json")
+    done < <(jq -r '.[] | "\(.name)\t\(.captureTime)\t\(.nodeUid)"' <<< "$conflict_json")
 
     while IFS= read -r fn; do
       [[ -z "$fn" ]] && continue
@@ -270,13 +271,13 @@ main() {
   local total_albums=0 total_photos=0 total_conflicts=0 total_missing_capture=0
   local -a high_conflict_albums=()
   local -a json_entries=()
-  local -a fix_fns=() fix_dates=()
+  local -a fix_fns=() fix_dates=() fix_uids=()
 
   while IFS=$'\t' read -r aname auid; do
     [[ -z "$aname" || -z "$auid" ]] && continue
     total_albums=$((total_albums + 1))
 
-    detect_album_conflicts "$aname" "$auid" || { CONFLICT_COUNT=0; MISSING_CAPTURE_COUNT=0; PHOTO_TOTAL=0; CONFLICT_FILES=(); continue; }
+    detect_album_conflicts "$aname" "$auid" || { CONFLICT_COUNT=0; MISSING_CAPTURE_COUNT=0; PHOTO_TOTAL=0; CONFLICT_FILES=(); CONFLICT_UIDS=(); continue; }
 
     local this_total=$PHOTO_TOTAL this_conflicts=$CONFLICT_COUNT this_missing=$MISSING_CAPTURE_COUNT
     total_photos=$((total_photos + this_total))
@@ -294,6 +295,7 @@ main() {
       for (( idx=0; idx < ${#CONFLICT_FILES[@]}; idx++ )); do
         fix_fns+=("${CONFLICT_FILES[$idx]}")
         fix_dates+=("${CONFLICT_DATES[$idx]}")
+        fix_uids+=("${CONFLICT_UIDS[$idx]}")
       done
     fi
 
@@ -352,7 +354,7 @@ main() {
       log "writing ${#fix_fns[@]} fix entries to $FIX_TSV"
       : > "$FIX_TSV"
       for (( idx=0; idx < ${#fix_fns[@]}; idx++ )); do
-        printf "%s\t%s\n" "${fix_fns[$idx]}" "${fix_dates[$idx]}" >> "$FIX_TSV"
+        printf "%s\t%s\t%s\n" "${fix_fns[$idx]}" "${fix_uids[$idx]}" "${fix_dates[$idx]}" >> "$FIX_TSV"
       done
       log "fix TSV written: $FIX_TSV"
     else
