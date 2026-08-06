@@ -12,21 +12,22 @@ time is wrong.
 
 - **Platform:** Linux (GNU `date`/coreutils).
 - **Dependencies:** `proton-drive` CLI (authenticated), `jq`, `date`,
-  `sha1sum`, `touch`, `find`, `awk`.
+  `sha1sum`, `touch`, `find`, `awk`, `sort`, `cut`, `grep`.
 
 ---
 
 ## Usage
 
 ```bash
-fix-photo-date.sh --file fixes.tsv [--dry-run] [--yes]
+fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--dry-run] [--yes]
 ```
 
 ## Flags
 
 | Flag | Description |
 |---|---|
-| `-f, --file` | **Required.** TSV input file with two columns: `filename<TAB>date-or-timestamp`. |
+| `-f, --file` | **Required.** TSV input file with two or three columns: `filename<TAB>date-or-timestamp` or `filename<TAB>nodeUid<TAB>date-or-timestamp`. |
+| `-a, --album-cache` | Directory with per-album JSON caches (from `detect-album-conflicts.sh --cache-dir`). Used to recover album membership when the timeline lacks it, and to disambiguate photos by uid. |
 | `-n, --dry-run` | **Read-only.** Show what would be done without making any changes. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `-h, --help` | Show the script help. |
@@ -44,18 +45,24 @@ fix-photo-date.sh --file fixes.tsv [--dry-run] [--yes]
 
 ## Input format
 
-A **TSV** file (tab-separated), two columns per line:
+A **TSV** file (tab-separated), with **two or three** columns per line:
 
 ```
 <filename><TAB><date or timestamp>
+<filename><TAB><nodeUid><TAB><date or timestamp>
 ```
+
+The optional **nodeUid** column pins the entry to a specific photo. Use it when
+multiple photos share the same filename — a uid-pinned entry is never rejected
+as "ambiguous". `detect-album-conflicts.sh --fix-tsv` emits the three-column
+format automatically.
 
 Example:
 
 ```
 VID_20161015_163723.mp4	2016-10-15 16:37:23
 IMG_0546.MOV	2010-08-12
-1476540000	1420070400
+IMG_1234.MOV	PNR_VlVhf...~2Z09zS8Z-tg...	1476540000
 ```
 
 ### Supported date formats
@@ -73,49 +80,83 @@ IMG_0546.MOV	2010-08-12
 
 ---
 
-## How it works (per photo)
+## How it works
 
-For each entry in the file:
+The script runs in three phases to avoid re-fetching the full Proton Photos
+timeline (a ~160 MB JSON) for every entry.
 
-1. **Precheck** — fetches the timeline once; entries not found in the timeline
-   are skipped, and entries with **multiple** photos of the same name are
-   aborted as ambiguous (disambiguate manually).
-2. **Find** — the photo's uid + album memberships are read from the Proton
-   Photos timeline by filename.
-3. **Download** — the original bytes are downloaded from Proton into a
+### Phase A — Index & precheck
+
+1. Fetches the timeline **once** and collapses it into a compact uid-keyed TSV
+   index (`uid`, name, captureTime, sha1, albums) in a single `jq` pass.
+2. **Precheck** — each entry is validated against the index in bulk:
+   - uid-pinned entries are checked against the set of known uids;
+   - name-based entries must match exactly one timeline photo (0 = missing,
+     >1 = ambiguous → skipped, disambiguate by adding a nodeUid column).
+3. If `--album-cache` is given, builds a reverse name→albums index from the
+   per-album caches so album membership can be restored even when the timeline
+   lacks `photo.albums` data.
+
+### Phase B — Fix every photo
+
+For each entry:
+
+1. **Find** — the photo's uid, sha1, captureTime and album memberships are read
+   from the prebuilt index (near-instant, no timeline scan). Name-based entries
+   map through the index; uid-pinned entries go straight to their uid.
+2. **Download** — the original bytes are downloaded from Proton into a
    dedicated, artifact-free work subdir.
-4. **Integrity check** — the downloaded file's sha1 must match the claimed
+3. **Integrity check** — the downloaded file's sha1 must match the claimed
    digest; otherwise the script **refuses to destroy the original**.
-5. **Fix mtime** — the filesystem mtime is set to the target date with
+4. **Fix mtime** — the filesystem mtime is set to the target date with
    `touch -t` (the CLI reads this as capture time for videos).
-6. **Persist state** — a state file (uid, albums, sha1, target date, local
+5. **Persist state** — a state file (uid, albums, sha1, target date, local
    path) is written **before** any destructive step.
-7. **Trash** — `proton-drive filesystem trash /photos/<uid>`.
-8. **Permanently delete** — `proton-drive filesystem delete /photos-trash/<uid>`.
-9. **Re-upload** — `proton-drive photo upload -c keep-both`, up to 3 attempts
+6. **Trash** — `proton-drive filesystem trash /photos/<uid>`.
+7. **Permanently delete** — `proton-drive filesystem delete /photos-trash/<uid>`.
+8. **Re-upload** — `proton-drive photo upload -c keep-both`, up to 3 attempts
    (handles a stale dedup cache that may skip once after delete).
-10. **Locate new uid** — matched by content sha1 (excluding the old uid),
-    polling the timeline for ≤ 30 s.
-11. **Verify capture time** — the new photo's `captureTime` must be within
-    ±120 s of the target; otherwise the entry is marked partial.
-12. **Restore albums** — re-adds the new uid to every original album,
-    checking each `add-photo` result.
+9. The entry is recorded in a pending file and the local byte copy is freed.
+
+### Phase C — Batch verify
+
+After **all** uploads, the timeline is fetched **once** (polling a few times if
+some new uids are not yet visible):
+
+1. **Locate new uid** — a `sha1 → newest uid` map is built from the final
+   timeline; each pending entry's new uid is found by content sha1.
+2. **Verify capture time** — the new photo's `captureTime` must be within
+   ±120 s of the target (timezone offset ignored if the date part matches);
+   otherwise the entry is marked partial.
+3. **Restore albums** — re-adds the new uid to every original album, checking
+   each `add-photo` result.
+
+> **Note on EXIF:** Proton derives `captureTime` from embedded EXIF for photos
+> that have it. Images with a valid EXIF date keep their EXIF date regardless
+> of the mtime fix — only videos (no EXIF) and photos without usable EXIF
+> respond to the mtime change. Such images are marked **partial**, matching the
+> behaviour of the older per-photo implementation.
 
 ---
 
 ## Safety guarantees
 
-- **Nothing is lost on failure.** The downloaded file and a state file
-  (`uid`, `albums`, `sha1`, `target date`, local path) are kept in
-  `$LOG_DIR/fix-work-<run>/` until the photo is **fully** fixed. Any failure
-  leaves them in place for manual recovery.
+- **Nothing is lost on failure.** A state file (`uid`, `albums`, `sha1`,
+  `target date`) is written before any destructive step and kept in
+  `$LOG_DIR/fix-work-<run>/` until the photo is **fully** verified and its
+  albums restored. Any failure leaves it in place for manual recovery. The
+  downloaded byte copy is removed only after a successful re-upload (it's
+  safely on Proton again).
 - **Integrity before destruction.** If the downloaded bytes don't match the
   claimed sha1, the script refuses to trash the original.
 - **Idempotent.** Photos already within ±120 s of the target date are skipped.
-- **Interrupt-safe.** `SIGINT`/`SIGTERM` preserve downloads and state and exit
-  with code 130.
+- **Interrupt-safe.** `SIGINT`/`SIGTERM` preserve state files and exit with
+  code 130. If interrupted between Phase B and Phase C, uploaded photos keep
+  their state files so a re-run can complete the verification and album
+  restore.
 - **Duplicate filenames rejected.** Duplicate entries in the TSV are skipped
-  (first wins).
+  (first wins); non-uid-pinned duplicate names in the timeline are skipped as
+  ambiguous — pin them with a nodeUid column.
 
 ---
 
@@ -137,6 +178,21 @@ echo -e "IMG_0546.MOV\t2010-08-12" >> fixes.tsv
 # Execute (skip the prompt)
 ~/gphoto2proton/fix-photo-date.sh --file fixes.tsv --yes
 ```
+
+### Batch from `detect-album-conflicts.sh` (with album restore)
+
+```bash
+# 1. Detect conflicts across all albums (also builds photo-cache/ for later)
+~/gphoto2proton/detect-album-conflicts.sh --cache-dir photo-cache \
+  --fix-tsv fixes-all.tsv
+
+# 2. Fix everything; --album-cache restores album membership afterwards
+~/gphoto2proton/fix-photo-date.sh --file fixes-all.tsv \
+  --album-cache photo-cache --yes
+```
+
+The three-column TSV produced by `detect-album-conflicts.sh` pins each entry
+to its exact uid, so duplicate filenames are fixed unambiguously.
 
 ### Batch of entries in different formats
 
