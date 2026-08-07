@@ -7,22 +7,30 @@
 # back to the archive extraction timestamp instead of the original recording
 # date).
 #
-# For each photo: find it in the timeline, download the original bytes,
-# verify content (sha1), adjust the filesystem mtime, persist a state file,
-# trash + permanently delete the old copy, re-upload (CLI reads the new mtime
-# as the capture time for videos), verify the new capture time, and restore
-# album membership.
+# For each photo: look it up in a prefetched timeline index, download the
+# original bytes, verify content (sha1), adjust the filesystem mtime, persist
+# a state file, trash + permanently delete the old copy, re-upload (CLI reads
+# the new mtime as the capture time for videos).
+#
+# Performance: instead of re-fetching the full timeline after EVERY upload to
+# locate the new uid (162MB JSON per photo), the fix phase runs for all photos
+# first, then a single final timeline fetch is used to locate all new uids by
+# content sha1, verify the new capture time, and restore album membership.
+# A compact uid-keyed index (built once) makes all lookups near-instant.
 #
 # Safety: the downloaded file and a state file (uid, albums, sha1, target
 # date) are kept in $LOG_DIR/fix-work-<run>/ until the photo is FULLY fixed.
 # Any failure leaves them in place for manual recovery; nothing is lost.
+# (The downloaded byte copy is removed right after a successful re-upload;
+# the state file is retained until the batch verification succeeds.)
 #
 # Timezone: naive datetimes are interpreted in the SERVER's timezone (the
 # date matters more than the exact time here). Override with TZ=... if needed.
 # Requires Linux (GNU date/coreutils).
 #
-# Input: a TSV file with two columns per line:
+# Input: a TSV file with two or three columns per line:
 #   <filename>\t<date_or_timestamp>
+#   <filename>\t<nodeUid>\t<date_or_timestamp>   (uid-pinned, unambiguous)
 #
 # Supported date formats:
 #   Unix epoch seconds    1476540000        (9-11 digits)
@@ -63,7 +71,7 @@ Usage:
   fix-photo-date.sh -f fixes.tsv [--dry-run] [--yes]
 
 Options:
-  -f, --file         TSV input file (filename<TAB>date) — required
+  -f, --file         TSV input file (filename<TAB>date or filename<TAB>nodeUid<TAB>date) — required
   -a, --album-cache  DIR with per-album JSON cache (from detect-album-conflicts.sh)
                      used to recover album membership when the timeline lacks it
   -n, --dry-run      Read-only: show what would be done
@@ -140,49 +148,12 @@ normalize_date() {
 }
 
 # ---------------------------------------------------------------------------
-# Timeline queries (jq-internal limiting; no `| head` → no SIGPIPE/pipefail).
-# ---------------------------------------------------------------------------
-count_matches() {
-  local timeline_json="$1" filename="$2"
-  jq --arg f "$filename" '[.[] | select(.name.ok == true and .name.value == $f)] | length' "$timeline_json"
-}
-
-photo_field() { # field-expr builder for the first name match
-  local timeline_json="$1" filename="$2" expr="$3"
-  # shellcheck disable=SC2154  # $f is a jq --arg variable, not bash
-  jq -r --arg f "$filename" "
-    first(.[] | select(.name.ok == true and .name.value == \$f)) // empty | $expr
-  " "$timeline_json"
-}
-
-albums_csv_for() {
-  local timeline_json="$1" filename="$2"
-  jq -r --arg f "$filename" '
-    first(.[] | select(.name.ok == true and .name.value == $f)) // empty |
-    ((.photo.albums // []) | map(if type == "object" then (.uid // "") else . end) | map(select(. != "")) | join(","))
-  ' "$timeline_json"
-}
-
-new_uid_by_sha1() { # exclude old uid; newest by creationTime
-  local timeline_json="$1" sha1="$2" old_uid="$3"
-  jq -r --arg s "$sha1" --arg old "$old_uid" '
-    [.[] | select(.activeRevision.claimedDigests.sha1 == $s and .uid != $old)]
-    | sort_by(.creationTime) | last | .uid // empty
-  ' "$timeline_json"
-}
-
-capture_time_of() {
-  local timeline_json="$1" uid="$2"
-  jq -r --arg u "$uid" 'first(.[] | select(.uid == $u)) // empty | (.photo.captureTime // "")' "$timeline_json"
-}
-
-# ---------------------------------------------------------------------------
 # Preflight
 # ---------------------------------------------------------------------------
 preflight() {
   local missing=()
   local b
-  for b in "$CLI" jq date sha1sum touch find awk; do
+  for b in "$CLI" jq date sha1sum touch find awk sort cut grep; do
     command -v "$b" >/dev/null 2>&1 || missing+=("$b")
   done
   if [[ ${#missing[@]} -gt 0 ]]; then err "missing: ${missing[*]}"; return 1; fi
@@ -191,6 +162,23 @@ preflight() {
   fi
   log "CLI=$CLI auth OK (store=$PROTON_DRIVE_CREDENTIALS_STORE)"
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Build a compact uid-keyed TSV index from a timeline JSON (single jq pass).
+# Columns: uid<TAB>name<TAB>captureTime<TAB>sha1<TAB>albumsCsv
+# ---------------------------------------------------------------------------
+build_uid_index() {
+  local timeline_json="$1" index_file="$2"
+  jq -r '
+    .[] | [
+      .uid,
+      (.name.value // ""),
+      (.photo.captureTime // ""),
+      (.activeRevision.claimedDigests.sha1 // ""),
+      ((((.photo.albums // []) | map(if type == "object" then (.nodeUid // "") else . end)) | map(select(. != ""))) | join(","))
+    ] | @tsv
+  ' "$timeline_json" 2>/dev/null > "$index_file"
 }
 
 # ---------------------------------------------------------------------------
@@ -219,15 +207,18 @@ main() {
   WORK_DIR="$LOG_DIR/fix-work-$RUN_TS"
   touch "$RUN_LOG"
   trap on_interrupt INT TERM
+  mkdir -p "$WORK_DIR"
 
   log "fix-photo-date: file=$file log=$RUN_LOG work=$WORK_DIR"
   preflight || return 1
 
   # --- Read TSV (trim names, strip CR, dedupe, tolerate missing trailing \n).
-  local -a filenames=() date_inputs=()
-  local line_num=0 fn dt rest
+  # Three-column format: filename\tnodeUid\tdate
+  # (nodeUid optional — 2-column format still accepted for backward compat)
+  local -a filenames=() date_inputs=() file_uids=()
+  local line_num=0 fn col2 col3 rest
   declare -A seen_names=()
-  while IFS=$'\t' read -r fn dt rest || [[ -n "${fn:-}" ]]; do
+  while IFS=$'\t' read -r fn col2 col3 rest || [[ -n "${fn:-}" ]]; do
     line_num=$((line_num + 1))
     fn="${fn%$'\r'}"
     fn="${fn#"${fn%%[![:space:]]*}"}"
@@ -238,15 +229,22 @@ main() {
       continue
     fi
     seen_names[$fn]=1
-    if [[ -n "${rest:-}" ]]; then
-      log "WARN: line $line_num: unexpected extra column(s) ignored for \"$fn\""
-    fi
-    if [[ -z "${dt:-}" ]]; then
-      err "line $line_num: missing date for \"$fn\" — skipping"
+    if [[ -z "$col2" ]]; then
+      err "line $line_num: missing data for \"$fn\" — skipping"
       continue
+    fi
+    # Detect 3-col format: filename\tnodeUid\tdate
+    # nodeUid contains ~, date contains -
+    local uid_col="" dt
+    if [[ -n "$col3" && "$col2" == *"~"* ]]; then
+      uid_col="$col2"
+      dt="$col3"
+    else
+      dt="$col2"
     fi
     filenames+=("$fn")
     date_inputs+=("$dt")
+    file_uids+=("$uid_col")
   done < "$file"
 
   if (( ${#filenames[@]} == 0 )); then err "no valid entries in $file"; return 1; fi
@@ -262,21 +260,43 @@ main() {
     target_epochs+=("$te")
   done
 
-  # --- Prefetch timeline ONCE; precheck for missing/duplicate names (F3).
+  # --- Prefetch timeline ONCE; build compact uid index (single jq pass).
+  # This makes precheck and per-photo lookups near-instant instead of one
+  # full 162MB jq scan per entry (~2.9s each).
   local timeline_pre="$LOG_DIR/.timeline-pre-$$.json"
   if ! "$CLI" photo timeline -d --json > "$timeline_pre" 2>/dev/null; then
     err "timeline fetch failed (preflight)"; rm -f "$timeline_pre"; return 1
   fi
+  local uid_index="$WORK_DIR/.uid-index.tsv"
+  build_uid_index "$timeline_pre" "$uid_index"
+  log "uid index built: $(wc -l < "$uid_index") entries from timeline"
+  rm -f "$timeline_pre"
+
+  # --- Precheck: uid-pinned entries via uid-set, name-based via name counts.
+  local uid_set="$WORK_DIR/.uid-set.txt"
+  cut -f1 "$uid_index" | sort -u > "$uid_set"
+  local name_count_file="$WORK_DIR/.name-count.tsv"
+  awk -F'\t' '{c[$2]++} END {for (n in c) print n"\t"c[n]}' "$uid_index" > "$name_count_file"
+
   declare -A skip_entry=()
-  local precheck_bad=0 nmatch
+  local precheck_bad=0 cnt
   for (( i = 0; i < ${#filenames[@]}; i++ )); do
-    nmatch=$(count_matches "$timeline_pre" "${filenames[$i]}")
-    if (( nmatch == 0 )); then
-      err "precheck: \"${filenames[$i]}\" not found in timeline — skipping"
-      skip_entry[$i]=1; precheck_bad=$((precheck_bad + 1))
-    elif (( nmatch > 1 )); then
-      err "precheck: $nmatch photos named \"${filenames[$i]}\" — ambiguous, aborting this entry (disambiguate manually)"
-      skip_entry[$i]=1; precheck_bad=$((precheck_bad + 1))
+    local fuid="${file_uids[$i]}"
+    if [[ -n "$fuid" ]]; then
+      if ! grep -F -x -q "$fuid" "$uid_set"; then
+        err "precheck: nodeUid \"$fuid\" for \"${filenames[$i]}\" not found in timeline — skipping"
+        skip_entry[$i]=1; precheck_bad=$((precheck_bad + 1))
+      fi
+    else
+      cnt=$(awk -F'\t' -v n="${filenames[$i]}" '$1==n{print $2; exit}' "$name_count_file")
+      cnt="${cnt:-0}"
+      if (( cnt == 0 )); then
+        err "precheck: \"${filenames[$i]}\" not found in timeline — skipping"
+        skip_entry[$i]=1; precheck_bad=$((precheck_bad + 1))
+      elif (( cnt > 1 )); then
+        err "precheck: $cnt photos named \"${filenames[$i]}\" — ambiguous, aborting this entry (disambiguate manually)"
+        skip_entry[$i]=1; precheck_bad=$((precheck_bad + 1))
+      fi
     fi
   done
   if (( precheck_bad > 0 )); then
@@ -294,14 +314,13 @@ main() {
     echo ""
     local confirm=""
     read -r -p "Proceed? [y/N] " confirm || confirm=""
-    [[ "$confirm" =~ ^[yY] ]] || { log "cancelled"; rm -f "$timeline_pre"; return 0; }
+    [[ "$confirm" =~ ^[yY] ]] || { log "cancelled"; return 0; }
   fi
-
-  mkdir -p "$WORK_DIR"
 
   # --- Build reverse album index from --album-cache (if provided).
   # Maps each filename to the list of album UIDs containing it.
-  local album_index="$WORK_DIR/.album-index.json"
+  local name_albums_file="$WORK_DIR/.name-albums.tsv"
+  declare -A name_albums=()
   if [[ -n "$ALBUM_CACHE" && -d "$ALBUM_CACHE" ]]; then
     log "building album index from $ALBUM_CACHE ..."
     local tmp_index="$WORK_DIR/.album-index-raw.json"
@@ -313,20 +332,36 @@ main() {
       done
     ' _ {} + >> "$tmp_index"
     # Group by filename into {name, albums: [uids...]}
-    jq -s '
-      group_by(.name) | map({
-        name: .[0].name,
-        albums: [.[].album]
-      })
-    ' "$tmp_index" > "$album_index"
+    jq -r -s '
+      group_by(.name) | map([.[0].name, ([.[].album] | join(","))]) | .[] | @tsv
+    ' "$tmp_index" > "$name_albums_file"
     rm -f "$tmp_index"
-    local idx_count
-    idx_count=$(jq 'length' "$album_index")
-    log "album index built: $idx_count filenames indexed"
+    local n a
+    while IFS=$'\t' read -r n a; do
+      name_albums["$n"]="$a"
+    done < "$name_albums_file"
+    log "album index built: ${#name_albums[@]} filenames indexed"
   fi
 
-  local total=${#filenames[@]} fix_ok=0 fix_fail=0 fix_partial=0
+  # --- Load per-uid fields (uid, name, captureTime, sha1, albums) into
+  # bash associative arrays so the per-photo loop never scans the timeline.
+  declare -A uid_capture=() uid_sha1=() uid_albums=()
+  local u n c s a
+  while IFS=$'\t' read -r u n c s a; do
+    uid_capture["$u"]="$c"
+    uid_sha1["$u"]="$s"
+    uid_albums["$u"]="$a"
+  done < "$uid_index"
 
+  local total=${#filenames[@]} fix_ok=0 fix_fail=0 fix_partial=0
+  local pending_file="$WORK_DIR/.pending.tsv"
+  : > "$pending_file"
+
+  # ==========================================================================
+  # PHASE B — fix every photo (download / verify / trash / delete / upload).
+  # No timeline re-fetch here; new-uid location and album restore are batched
+  # into a single final timeline fetch in PHASE C.
+  # ==========================================================================
   for (( i = 0; i < total; i++ )); do
     if [[ -n "${skip_entry[$i]:-}" ]]; then continue; fi
     local fn="${filenames[$i]}" norm="${norm_dates[$i]}" target_epoch="${target_epochs[$i]}"
@@ -334,26 +369,33 @@ main() {
     touch_fmt=$(to_touch_format "$norm") || { err "cannot build touch format for \"$norm\""; fix_fail=$((fix_fail+1)); continue; }
     log "[$((i+1))/$total] ==== $fn → $norm ===="
 
-    # Lookup in prefetched timeline.
+    # --- Lookup from prebuilt index (no timeline scans).
     local uid sha1_before albums_csv capture_before
-    uid=$(photo_field "$timeline_pre" "$fn" ".uid")
-    albums_csv=$(albums_csv_for "$timeline_pre" "$fn")
-    # Fallback: timeline often lacks photo.albums; use cache index if available
-    if [[ -z "$albums_csv" && -f "$album_index" ]]; then
-      local cache_albums
-      cache_albums=$(jq -r --arg f "$fn" 'first(.[] | select(.name == $f) | .albums // []) | join(",")' "$album_index" 2>/dev/null || echo "")
-      if [[ -n "$cache_albums" ]]; then
-        albums_csv="$cache_albums"
-        log "  album membership recovered from cache: $albums_csv"
+    local fuid="${file_uids[$i]}"
+    if [[ -n "$fuid" ]]; then
+      uid="$fuid"
+      if [[ -z "${uid_sha1[$fuid]:-}" ]]; then
+        err "photo \"$fn\" (uid=$uid) not found in timeline"
+        fix_fail=$((fix_fail+1)); continue
+      fi
+    else
+      # name → uid fallback (rare, 2-col input): find first uid whose name matches
+      uid=$(awk -F'\t' -v n="$fn" '$2==n{print $1; exit}' "$uid_index")
+      if [[ -z "$uid" ]]; then
+        err "photo \"$fn\" not found in timeline (was it removed since precheck?)"
+        fix_fail=$((fix_fail+1)); continue
       fi
     fi
-    sha1_before=$(photo_field "$timeline_pre" "$fn" "(.activeRevision.claimedDigests.sha1 // \"\")")
-    capture_before=$(photo_field "$timeline_pre" "$fn" "(.photo.captureTime // \"\")")
+    sha1_before="${uid_sha1[$uid]:-}"
+    capture_before="${uid_capture[$uid]:-}"
+    albums_csv="${uid_albums[$uid]:-}"
 
-    if [[ -z "$uid" ]]; then
-      err "photo \"$fn\" not found in timeline (was it removed since precheck?)"
-      fix_fail=$((fix_fail+1)); continue
+    # Fallback: timeline often lacks photo.albums; use cache index if available
+    if [[ -z "$albums_csv" && -n "${name_albums[$fn]:-}" ]]; then
+      albums_csv="${name_albums[$fn]}"
+      log "  album membership recovered from cache: $albums_csv"
     fi
+
     if [[ -z "$sha1_before" ]]; then
       err "photo \"$fn\": no claimed sha1 digest — refusing to proceed (cannot verify re-upload)"
       fix_fail=$((fix_fail+1)); continue
@@ -461,77 +503,136 @@ main() {
       fix_fail=$((fix_fail+1)); continue
     fi
 
-    # --- Locate the new uid by content sha1, excluding the old uid (poll ≤30s).
-    local new_uid="" poll=0 timeline_now="$WORK_DIR/timeline-now-$i.json"
-    while (( poll < 6 )); do
-      sleep 5
-      if "$CLI" photo timeline -d --json > "$timeline_now" 2>/dev/null; then
-        new_uid=$(new_uid_by_sha1 "$timeline_now" "$sha1_before" "$uid")
-        [[ -n "$new_uid" ]] && break
-      fi
-      poll=$((poll + 1))
-    done
-    if [[ -z "$new_uid" ]]; then
-      err "new uid not found within 30s for $fn — uploaded file preserved at $local_path (state: $state_file)"
-      fix_fail=$((fix_fail+1)); continue
-    fi
-    log "  new uid=$new_uid"
-
-    # --- Verify the new capture time actually matches the target (F13).
-    local entry_partial=0 new_capture new_capture_epoch="" cap_delta=""
-    new_capture=$(capture_time_of "$timeline_now" "$new_uid")
-    if [[ -n "$new_capture" ]]; then
-      new_capture_epoch=$(to_epoch "$new_capture" 2>/dev/null || echo "")
-    fi
-    if [[ -n "$new_capture_epoch" ]]; then
-      cap_delta=$(( new_capture_epoch > target_epoch ? new_capture_epoch - target_epoch : target_epoch - new_capture_epoch ))
-      if (( cap_delta > 120 )); then
-        # Timezone offset? Check if the DATE part matches
-        if [[ "${new_capture:0:10}" == "${norm:0:10}" ]]; then
-          log "  captureTime verified: $new_capture (date matches, timezone offset ignored)"
-        else
-          err "captureTime mismatch for $fn: got $new_capture, target $norm (delta ${cap_delta}s) — photo re-uploaded but date NOT fixed"
-          entry_partial=1
-        fi
-      else
-        log "  captureTime verified: $new_capture"
-      fi
-    else
-      log "  WARN: could not read new captureTime for verification (new uid=$new_uid)"
-    fi
-
-    # --- Restore album membership, checking per-photo ok (F11).
-    if [[ -n "$albums_csv" ]]; then
-      local -a album_uids=()
-      IFS=',' read -ra album_uids <<< "$albums_csv"
-      local auid add_rc=0 add_ok="" add_out="$WORK_DIR/album-add-$i.json"
-      for auid in "${album_uids[@]}"; do
-        [[ -z "$auid" ]] && continue
-        log "  adding to album $auid ..."
-        add_rc=0
-        "$CLI" album add-photo --json "/albums/$auid" "/photos/$new_uid" > "$add_out" 2>"$WORK_DIR/album-add-$i.err" || add_rc=$?
-        add_ok=$(jq -r 'first(.[]?) // empty | (.ok // false)' "$add_out" 2>/dev/null || echo "false")
-        if (( add_rc != 0 )) || [[ "$add_ok" != "true" ]]; then
-          err "album add-photo failed for $auid (photo $new_uid, rc=$add_rc ok=$add_ok)"
-          entry_partial=1
-        else
-          log "    done"
-        fi
-      done
-    fi
-
-    if (( entry_partial == 0 )); then
-      rm -rf "$dl" "$timeline_now"
-      rm -f "$state_file" "$WORK_DIR/download-$i.out" "$WORK_DIR/trash-$i.out" "$WORK_DIR/delete-$i.out" "$WORK_DIR/upload-$i.json" "$WORK_DIR/upload-$i.err"
-      fix_ok=$((fix_ok + 1))
-      log "  OK"
-    else
-      fix_partial=$((fix_partial + 1))
-      log "  PARTIAL (kept work files in $WORK_DIR)"
-    fi
+    # Upload succeeded: record for batch verification. Local bytes are now
+    # safely re-uploaded to Proton, so free the disk copy right away (the
+    # state file retains uid/sha1/albums for recovery).
+    printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$sha1_before" "$uid" "$albums_csv" "$norm" >> "$pending_file"
+    rm -rf "$dl"
+    log "  uploaded — deferred to batch verification"
   done
 
-  rm -f "$timeline_pre"
+  # ==========================================================================
+  # PHASE C — batch verification (single final timeline fetch).
+  # Locate each uploaded photo's new uid by content sha1, verify the new
+  # capture time, and restore album membership.
+  # ==========================================================================
+  if [[ -s "$pending_file" ]]; then
+    local n_pending
+    n_pending=$(wc -l < "$pending_file")
+    log "batch verifying $n_pending uploaded photos ..."
+
+    local final_timeline="$WORK_DIR/timeline-final.json"
+    local final_index="$WORK_DIR/.uid-index-final.tsv"
+    local sha1_uid_file="$WORK_DIR/.sha1-uid.tsv"
+    local new_uid="" poll=0 found_all=0
+
+    # Poll: fetch timeline, build sha1→newest-uid map; stop when all pending
+    # sha1s are found (only re-fetches the timeline if something is missing).
+    while (( poll < 6 )); do
+      if "$CLI" photo timeline -d --json > "$final_timeline" 2>/dev/null; then
+        build_uid_index "$final_timeline" "$final_index"
+        # newest uid per sha1 (excludes nothing; old uid was deleted already)
+        jq -r '
+          group_by(.activeRevision.claimedDigests.sha1)
+          | .[]
+          | sort_by(.creationTime)
+          | last
+          | select((.activeRevision.claimedDigests.sha1 // "") != "")
+          | [.activeRevision.claimedDigests.sha1, .uid] | @tsv
+        ' "$final_timeline" 2>/dev/null > "$sha1_uid_file"
+        declare -A sha1_uid=()
+        local su s2
+        while IFS=$'\t' read -r s2 su; do
+          sha1_uid["$s2"]="$su"
+        done < "$sha1_uid_file"
+        # Are all pending sha1s present?
+        found_all=1
+        while IFS=$'\t' read -r _ s2 _ _ _; do
+          if [[ -z "${sha1_uid[$s2]:-}" ]]; then found_all=0; break; fi
+        done < "$pending_file"
+        (( found_all == 1 )) && break
+      fi
+      poll=$((poll + 1))
+      [[ $poll -lt 6 ]] && { log "  not all new uids visible yet (poll $poll/5), waiting ..."; sleep 10; }
+    done
+
+    if (( found_all == 0 )); then
+      err "some new uids were not found after $poll timeline fetches — inspect $WORK_DIR/.pending.tsv and state files"
+      fix_fail=$((fix_fail + n_pending))
+    else
+      # Preload capture times of the final index for verification.
+      declare -A fin_uid_capture=()
+      while IFS=$'\t' read -r u n c s a; do
+        fin_uid_capture["$u"]="$c"
+      done < "$final_index"
+
+      local i2 sha1 albums_csv norm2 entry_partial new_capture new_capture_epoch cap_delta
+      while IFS=$'\t' read -r i2 sha1 _old_uid albums_csv norm2; do
+        fn="${filenames[$i2]}"
+        target_epoch="${target_epochs[$i2]}"
+        new_uid="${sha1_uid[$sha1]:-}"
+        if [[ -z "$new_uid" ]]; then
+          err "new uid not found for $fn (sha1=$sha1) — uploaded file needs manual inspection (state: $WORK_DIR/$fn.state)"
+          fix_fail=$((fix_fail+1)); continue
+        fi
+        log "  [$fn] new uid=$new_uid"
+
+        # --- Verify the new capture time actually matches the target (F13).
+        entry_partial=0
+        new_capture="${fin_uid_capture[$new_uid]:-}"
+        new_capture_epoch=""
+        if [[ -n "$new_capture" ]]; then
+          new_capture_epoch=$(to_epoch "$new_capture" 2>/dev/null || echo "")
+        fi
+        if [[ -n "$new_capture_epoch" ]]; then
+          cap_delta=$(( new_capture_epoch > target_epoch ? new_capture_epoch - target_epoch : target_epoch - new_capture_epoch ))
+          if (( cap_delta > 120 )); then
+            # Timezone offset? Check if the DATE part matches
+            if [[ "${new_capture:0:10}" == "${norm2:0:10}" ]]; then
+              log "  captureTime verified: $new_capture (date matches, timezone offset ignored)"
+            else
+              err "captureTime mismatch for $fn: got $new_capture, target $norm2 (delta ${cap_delta}s) — photo re-uploaded but date NOT fixed"
+              entry_partial=1
+            fi
+          else
+            log "  captureTime verified: $new_capture"
+          fi
+        else
+          log "  WARN: could not read new captureTime for verification (new uid=$new_uid)"
+        fi
+
+        # --- Restore album membership, checking per-photo ok (F11).
+        if [[ -n "$albums_csv" ]]; then
+          local -a album_uids=()
+          IFS=',' read -ra album_uids <<< "$albums_csv"
+          local auid add_rc=0 add_ok="" add_out="$WORK_DIR/album-add-$i2.json"
+          for auid in "${album_uids[@]}"; do
+            [[ -z "$auid" ]] && continue
+            log "  adding to album $auid ..."
+            add_rc=0
+            "$CLI" album add-photo --json "/albums/$auid" "/photos/$new_uid" > "$add_out" 2>"$WORK_DIR/album-add-$i2.err" || add_rc=$?
+            add_ok=$(jq -r 'first(.[]?) // empty | (.ok // false)' "$add_out" 2>/dev/null || echo "false")
+            if (( add_rc != 0 )) || [[ "$add_ok" != "true" ]]; then
+              err "album add-photo failed for $auid (photo $new_uid, rc=$add_rc ok=$add_ok)"
+              entry_partial=1
+            else
+              log "    done"
+            fi
+          done
+        fi
+
+        if (( entry_partial == 0 )); then
+          rm -f "$WORK_DIR/$fn.state" "$WORK_DIR/download-$i2.out" "$WORK_DIR/trash-$i2.out" "$WORK_DIR/delete-$i2.out" "$WORK_DIR/upload-$i2.json" "$WORK_DIR/upload-$i2.err" "$WORK_DIR/album-add-$i2.json" "$WORK_DIR/album-add-$i2.err" "$WORK_DIR/timeline-now-$i2.json"
+          fix_ok=$((fix_ok + 1))
+          log "  OK"
+        else
+          fix_partial=$((fix_partial + 1))
+          log "  PARTIAL (kept state file for $fn)"
+        fi
+      done < "$pending_file"
+    fi
+  fi
+
   log "==== done: $fix_ok fixed, $fix_partial partial, $fix_fail failed ===="
 
   if (( fix_fail > 0 )); then

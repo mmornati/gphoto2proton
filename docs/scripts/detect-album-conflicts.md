@@ -23,7 +23,7 @@ detect-album-conflicts.sh [options]
 
 | Flag | Description |
 |---|---|
-| `--fix-tsv FILE` | Output a TSV ready for `fix-photo-date.sh` (filename, date) |
+| `--fix-tsv FILE` | Output a TSV ready for `fix-photo-date.sh` (filename, nodeUid, date) |
 | `-n, --dry-run` | Read-only: scan and report, do not write fix TSV |
 | `-v, --verbose` | List each conflicting file per album |
 | `--summary-only` | Just show per-album conflict counts (no details) |
@@ -41,6 +41,26 @@ detect-album-conflicts.sh [options]
 | `CLI` | `proton-drive` | Path to the `proton-drive` binary |
 | `LOG_DIR` | `$HOME/gphoto2proton/logs` | Run logs directory |
 | `PROTON_DRIVE_CREDENTIALS_STORE` | `pass` | Secret store for the `proton-drive` CLI session |
+
+---
+
+## Fix TSV format
+
+The `--fix-tsv FILE` output is a **three-column** TSV:
+
+```
+<filename><TAB><nodeUid><TAB><suggested date>
+```
+
+The middle `nodeUid` column pins each conflict to its exact Proton photo uid.
+This lets `fix-photo-date.sh` resolve duplicate filenames unambiguously
+(`fix-photo-date.sh` still accepts the older two-column format too).
+
+Example:
+
+```
+IMG_0715.MOV	PNR_VlVhf...~2Z09zS8Z-tg...	2025-08-15 12:00:00
+```
 
 ---
 
@@ -147,6 +167,14 @@ Then fix with:
 ./fix-photo-date.sh --file fixes-2025.tsv --yes
 ```
 
+Or, to restore album membership after fixing (using the cache the scanner
+built):
+
+```bash
+./detect-album-conflicts.sh --cache-dir ~/photo-cache --fix-tsv fixes-2025.tsv
+./fix-photo-date.sh --file fixes-2025.tsv --album-cache ~/photo-cache --yes
+```
+
 ### Summary-only (compact)
 
 ```bash
@@ -197,11 +225,13 @@ Then fix with:
 # 2. Review the output
 less conflicts.tsv
 
-# 3. Apply fixes (dry-run first)
-./fix-photo-date.sh --file conflicts.tsv --dry-run
-./fix-photo-date.sh --file conflicts.tsv --yes
+# 3. Apply fixes (dry-run first), restoring albums from the same cache
+./fix-photo-date.sh --file conflicts.tsv --album-cache ~/photo-cache --dry-run
+./fix-photo-date.sh --file conflicts.tsv --album-cache ~/photo-cache --yes
 
-# 4. Re-scan from cache to verify
+# 4. Re-scan from cache to verify (refresh the cache first — it is stale
+#    after fixing)
+rm -rf ~/photo-cache
 ./detect-album-conflicts.sh --cache-dir ~/photo-cache --summary-only
 ```
 
@@ -218,8 +248,9 @@ cd ~/gphoto2proton
 ./detect-album-conflicts.sh --cache-dir ~/gphoto2proton/photo-cache \
   --year 2025 --summary-only
 
-# 3. Fix videos with wrong dates
-./fix-photo-date.sh --file ~/gphoto2proton/fixes-all.tsv --yes
+# 3. Fix videos with wrong dates (restoring albums from the same cache)
+./fix-photo-date.sh --file ~/gphoto2proton/fixes-all.tsv \
+  --album-cache ~/gphoto2proton/photo-cache --yes
 
 # 4. Refresh cache after fixing and re-check
 rm -rf ~/gphoto2proton/photo-cache
