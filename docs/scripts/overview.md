@@ -74,6 +74,7 @@ flowchart TD
 | [`gphoto2-album-repair.sh`](album-repair.md) | Repair album membership: add missing photos to existing albums, create missing albums and populate them based on Takeout log data. Supports `--dry-run` preview. |
 | [`fix-photo-date.sh`](fix-photo-date.md) | Fix the capture time of already-uploaded Proton Photos (typically videos that got the archive extraction date instead of the recording date). |
 | [`detect-album-conflicts.sh`](detect-album-conflicts.md) | Scan all albums for photos with wrong capture times — outputs a TSV ready for `fix-photo-date.sh`. |
+| [`detect-google-conflicts.sh`](detect-google-conflicts.md) | Find ALL Google-sourced photos whose Proton capture time differs from the Google Takeout metadata (photoTakenTime) — uses the local extraction + sidecar JSON + sha1 index. |
 | [`generate-album-order.sh`](album-reorder.md) | Generate an ordered (oldest-first) TSV of all albums with their inferred year — input for `reorder-albums.sh`. |
 | [`reorder-albums.sh`](album-reorder.md) | Reorder the Proton web UI album grid chronologically by bumping each album's `lastActivityTime` in file order. |
 
@@ -89,4 +90,5 @@ credentials needed.
 - [Import Script Reference](import.md) — every flag, env var, and pipeline step
 - [Fix Photo Date Reference](fix-photo-date.md) — fix wrong capture dates
 - [Detect Album Conflicts Reference](detect-album-conflicts.md) — find albums with date mismatches
+- [Detect Google Conflicts Reference](detect-google-conflicts.md) — find Google-sourced photos with wrong dates
 - [Album Reorder Reference](album-reorder.md) — make the album grid chronological on the web UI
