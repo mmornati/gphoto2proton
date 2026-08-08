@@ -41,7 +41,7 @@
 #
 # Usage:
 #   fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--local-source DIR]
-#                     [--exif-date] [--dry-run] [--yes]
+#                     [--index FILE] [--exif-date] [--dry-run] [--yes]
 #
 # The --album-cache DIR option points at the per-album JSON cache produced by
 # detect-album-conflicts.sh. The timeline's photo.albums field is often empty,
@@ -50,7 +50,8 @@
 #
 # The --local-source DIR option points at a directory containing the original
 # Google Photos files (e.g. extracted from a Takeout archive, one folder per
-# album). DIR/.sha1-index.txt must map "<sha1>  <path>" for every file. Photos
+# album). Its .sha1-index.txt (or the file given with --index) must map
+# "<sha1>  <path>" for every file. Photos
 # found locally by sha1 are copied from disk instead of downloaded from Proton
 # (much faster), and a sibling ".supplemental-metadata.json" file is used to
 # override the target date with the REAL Google capture time (photoTakenTime)
@@ -75,6 +76,7 @@ DRY_RUN=0
 YES=0
 ALBUM_CACHE=""
 LOCAL_SOURCE=""
+INDEX_FILE=""
 EXIF_DATE=0
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN_LOG"; }
@@ -94,6 +96,8 @@ Options:
   -s, --local-source DIR with extracted original photos + .sha1-index.txt;
                      use local copies instead of downloading, and prefer the
                      real capture time from *.supplemental-metadata.json
+  -i, --index FILE   Path to the sha1 index (default DIR/.sha1-index.txt);
+                     useful when the local-source dir is read-only
   -x, --exif-date    Rewrite EXIF date tags (DateTimeOriginal/CreateDate/
                      ModifyDate) of the fixed copy before upload (exiftool).
                      Preserves all other EXIF metadata (GPS, camera, ...).
@@ -217,6 +221,7 @@ main() {
       -y|--yes) YES=1 ;;
       -a|--album-cache) shift; ALBUM_CACHE="${1:-}"; [[ -z "$ALBUM_CACHE" ]] && { err "--album-cache requires a path"; usage; return 2; } ;;
       -s|--local-source) shift; LOCAL_SOURCE="${1:-}"; [[ -z "$LOCAL_SOURCE" ]] && { err "--local-source requires a path"; usage; return 2; } ;;
+      -i|--index) shift; INDEX_FILE="${1:-}"; [[ -z "$INDEX_FILE" ]] && { err "--index requires a path"; usage; return 2; } ;;
       -x|--exif-date) EXIF_DATE=1 ;;
       *) err "unknown: $1"; usage; return 2 ;;
     esac
@@ -233,8 +238,9 @@ main() {
   fi
   if [[ -n "$LOCAL_SOURCE" ]]; then
     if [[ ! -d "$LOCAL_SOURCE" ]]; then err "local source dir not found: $LOCAL_SOURCE"; return 2; fi
-    if [[ ! -f "$LOCAL_SOURCE/.sha1-index.txt" ]]; then
-      err "local source missing $LOCAL_SOURCE/.sha1-index.txt (build it with: find ... -exec sha1sum {} + > .sha1-index.txt)"; return 2
+    INDEX_FILE="${INDEX_FILE:-$LOCAL_SOURCE/.sha1-index.txt}"
+    if [[ ! -f "$INDEX_FILE" ]]; then
+      err "local source missing $INDEX_FILE (build it with: find ... -exec sha1sum {} + > .sha1-index.txt)"; return 2
     fi
   fi
 
@@ -388,12 +394,12 @@ main() {
   # Skip .supplemental-metadata.json and other .json sidecars when building.
   declare -A sha1_path=()
   if [[ -n "$LOCAL_SOURCE" ]]; then
-    log "loading sha1 index from $LOCAL_SOURCE/.sha1-index.txt ..."
+    log "loading sha1 index from $INDEX_FILE ..."
     local s_idx s_p
     while read -r s_idx s_p; do
       [[ -z "$s_idx" || -z "$s_p" ]] && continue
       sha1_path["$s_idx"]="$s_p"
-    done < "$LOCAL_SOURCE/.sha1-index.txt"
+    done < "$INDEX_FILE"
     log "sha1 index loaded: ${#sha1_path[@]} files"
   fi
 

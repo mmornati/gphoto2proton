@@ -73,6 +73,12 @@ name would have suggested something different.
    real date (fallback: unique-filename match, which covers files whose bytes
    differ, e.g. NEF converted to JPG by Proton). If the UTC date parts
    disagree, it is a conflict.
+4. **Filename fallback.** Photos with no sidecar (e.g. WhatsApp
+   `IMG-YYYYMMDD-WAxxxx(x).jpg`, `VID-YYYYMMDD-WAxxxx.mp4`, `P_YYYYMMDD_HHMMSS`,
+   `VIDEO_YYYYMMDD_HHMMSS`, `FB_IMG_<epoch>`, `YYYYMMDD_HHMMSS-MOTION.gif`)
+   fall back to a date parsed from the filename itself. Only validated
+   dates are used (a bare year is ignored to avoid false positives); truly
+   undatable files (e.g. `CIMG1703.AVI`) are skipped.
 
 ## Building the sha1 index (important)
 

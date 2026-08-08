@@ -23,6 +23,10 @@
 #      captureTime date differs from the Google photoTakenTime date, the photo
 #      is a conflict.
 #
+#   fallback: when a photo has no sidecar (WhatsApp duplicates like
+#   "IMG-...WA0000(1).jpg", "-MOTION.gif", edited copies, orphan videos, ...),
+#   try to recover the real date from the filename itself (see filename_epoch).
+#
 # Output: a fix TSV ready for fix-photo-date.sh, one line per conflict:
 #   <filename>\t<nodeUid>\t<real capture time "YYYY-MM-DD HH:MM:SS">
 #
@@ -63,6 +67,97 @@ Options:
 
 Output TSV columns: filename<TAB>nodeUid<TAB>YYYY-MM-DD HH:MM:SS
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Helpers: extract a plausible capture date from a filename.
+# Used as a fallback for photos that have no supplemental-metadata.json.
+# ---------------------------------------------------------------------------
+
+# Validates an 8-digit date "YYYYMMDD" (and optional "HHMMSS"), prints a
+# unix epoch on success, nothing otherwise.
+mk_epoch() {
+  local ds="$1" ts="${2:-}"
+  local y="${ds:0:4}" mo="${ds:4:2}" d="${ds:6:2}"
+  [[ "$mo" =~ ^(0[1-9]|1[0-2])$ ]] || return 1
+  [[ "$d" =~ ^(0[1-9]|[12][0-9]|3[01])$ ]] || return 1
+  if [[ -n "$ts" ]]; then
+    local h="${ts:0:2}" mi="${ts:2:2}" s="${ts:4:2}"
+    [[ "$h" =~ ^([01][0-9]|2[0-3])$ ]] || return 1
+    [[ "$mi" =~ ^[0-5][0-9]$ ]] || return 1
+    [[ "$s" =~ ^[0-5][0-9]$ ]] || return 1
+    echo "$(date -d "$y-$mo-$d $h:$mi:$s" +%s 2>/dev/null || true)"
+    return 0
+  fi
+  echo "$(date -d "$y-$mo-$d 12:00:00" +%s 2>/dev/null || true)"
+  return 0
+}
+
+# Attempt to recover a capture time from a filename alone. On success sets the
+# globals FNAME_EPOCH (unix epoch) and FNAME_KIND ("datetime" | "date" |
+# "year") and returns 0; on failure returns 1. Uses globals (not stdout)
+# because it is invoked from a subshell during the comparison loop.
+FNAME_EPOCH=""
+FNAME_KIND=""
+filename_epoch() {
+  local bn="$1"
+  local base="${bn%.*}"   # strip extension
+  local tmp ep out ds
+  FNAME_EPOCH=""
+  FNAME_KIND=""
+
+  # Google/Facebook import: FB_IMG_<epoch> (ms or s)
+  if [[ "$base" =~ FB_IMG_[0-9]{10,13} ]]; then
+    tmp="${BASH_REMATCH[0]#FB_IMG_}"
+    if [[ ${#tmp} -ge 13 ]]; then ep=$((tmp / 1000)); else ep=$tmp; fi
+    [[ "$ep" =~ ^[0-9]+$ ]] || return 1
+    (( ep > 0 )) || return 1
+    FNAME_EPOCH="$ep"; FNAME_KIND="date"
+    return 0
+  fi
+
+  # Leading/embedded YYYYMMDD_HHMMSS (e.g. 20140307_194243-MOTION.gif,
+  # VIDEO_20150214_124556.mp4, P_20180813_200643.gif)
+  if [[ "$base" =~ (^|[^0-9])((19|20)[0-9]{6})[_-]([0-9]{6}) ]]; then
+    if out=$(mk_epoch "${BASH_REMATCH[2]}" "${BASH_REMATCH[4]}"); then
+      FNAME_EPOCH="$out"; FNAME_KIND="datetime"
+      return 0
+    fi
+  fi
+
+  # WhatsApp: IMG-/VID-YYYYMMDD-WAxxxx (with or without "(1)" suffix)
+  ds=""
+  if [[ "$base" =~ (^|-)IMG[-_]([0-9]{8}) ]]; then ds="${BASH_REMATCH[2]}"
+  elif [[ "$base" =~ (^|-)VID[-_]([0-9]{8}) ]]; then ds="${BASH_REMATCH[2]}"; fi
+  if [[ -n "$ds" ]]; then
+    if out=$(mk_epoch "$ds"); then
+      FNAME_EPOCH="$out"; FNAME_KIND="date"
+      return 0
+    fi
+  fi
+
+  # Bare YYYYMMDD anywhere (validated month/day)
+  if [[ "$base" =~ (19|20)[0-9]{6} ]]; then
+    tmp="${BASH_REMATCH[0]}"
+    if [[ "$tmp" =~ ^(19|20)(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])$ ]]; then
+      if out=$(mk_epoch "$tmp"); then
+        FNAME_EPOCH="$out"; FNAME_KIND="date"
+        return 0
+      fi
+    fi
+  fi
+
+  # 4-digit year only (e.g. "Year in Photos 2014.m4v") — low confidence
+  if [[ "$base" =~ (19|20)[0-9]{2} ]]; then
+    tmp="${BASH_REMATCH[0]}"
+    out=$(date -d "${tmp}-01-01 12:00:00" +%s 2>/dev/null || true)
+    if [[ -n "$out" ]]; then
+      FNAME_EPOCH="$out"; FNAME_KIND="year"
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -192,7 +287,7 @@ main() {
 
   local conflicts="$work/conflicts.tsv"
   : > "$conflicts"
-  local sha1 uid name cap real_utc cap_date out_date real_epoch n_sha1_matches n_checked=0 n_conflicts=0
+  local sha1 uid name cap real_utc cap_date out_date real_epoch n_sha1_matches n_checked=0 n_conflicts=0 n_fname=0
 
   while IFS=$'\t' read -r sha1 uid name cap; do
     [[ -z "$sha1" ]] && continue
@@ -204,6 +299,18 @@ main() {
     elif [[ -n "$name" && "${tl_name_count[$name]:-0}" == "1" && -n "${local_by_name[$name]:-}" ]]; then
       real_epoch="${local_by_name[$name]}"
     fi
+
+    # NEW: filename fallback for photos that have no sidecar at all
+    # (WhatsApp "(1)" duplicates, -MOTION.gif, edited copies, orphan videos).
+    # Only "date"/"datetime" patterns are confident enough; bare-year matches
+    # are ignored to avoid false positives.
+    if [[ -z "$real_epoch" && -n "$name" ]] && filename_epoch "$name"; then
+      if [[ "$FNAME_KIND" == "date" || "$FNAME_KIND" == "datetime" ]]; then
+        real_epoch="$FNAME_EPOCH"
+        n_fname=$((n_fname + 1))
+      fi
+    fi
+
     [[ -z "$real_epoch" ]] && continue
 
     real_utc=$(date -u -d "@$real_epoch" '+%Y-%m-%d' 2>/dev/null || true)
@@ -219,6 +326,7 @@ main() {
   done < "$timeline_tsv"
 
   log "  compared $n_checked timeline photos (those with a sha1)"
+  log "  $n_fname matched by filename date (no sidecar)"
   log "  CONFLICTS FOUND: $n_conflicts (Proton date differs from Google photoTakenTime)"
 
   if [[ -n "$OUTPUT" ]]; then
