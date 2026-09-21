@@ -40,12 +40,28 @@
 #   Date only             2016-10-15        (time defaults to 12:00:00)
 #
 # Usage:
-#   fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--dry-run] [--yes]
+#   fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--local-source DIR]
+#                     [--index FILE] [--exif-date] [--dry-run] [--yes]
 #
 # The --album-cache DIR option points at the per-album JSON cache produced by
 # detect-album-conflicts.sh. The timeline's photo.albums field is often empty,
 # so album membership is recovered from these cache files instead. DIR should
 # contain one <album-uid>.json file per album.
+#
+# The --local-source DIR option points at a directory containing the original
+# Google Photos files (e.g. extracted from a Takeout archive, one folder per
+# album). Its .sha1-index.txt (or the file given with --index) must map
+# "<sha1>  <path>" for every file. Photos
+# found locally by sha1 are copied from disk instead of downloaded from Proton
+# (much faster), and a sibling ".supplemental-metadata.json" file is used to
+# override the target date with the REAL Google capture time (photoTakenTime)
+# when available.
+#
+# The --exif-date flag additionally rewrites the EXIF date tags
+# (DateTimeOriginal / CreateDate / ModifyDate) of the local copy before upload.
+# JPEGs without a usable EXIF date keep the filesystem mtime as the capture
+# time; rewriting the EXIF tags makes Proton honour the corrected date for
+# image files too (requires exiftool; other metadata like GPS is preserved).
 #
 set -euo pipefail
 
@@ -59,6 +75,9 @@ WORK_DIR=""
 DRY_RUN=0
 YES=0
 ALBUM_CACHE=""
+LOCAL_SOURCE=""
+INDEX_FILE=""
+EXIF_DATE=0
 
 log() { echo "[$(date +%H:%M:%S)] $*" | tee -a "$RUN_LOG"; }
 err() { echo "[$(date +%H:%M:%S)] ERROR: $*" | tee -a "$RUN_LOG" >&2; }
@@ -74,6 +93,14 @@ Options:
   -f, --file         TSV input file (filename<TAB>date or filename<TAB>nodeUid<TAB>date) — required
   -a, --album-cache  DIR with per-album JSON cache (from detect-album-conflicts.sh)
                      used to recover album membership when the timeline lacks it
+  -s, --local-source DIR with extracted original photos + .sha1-index.txt;
+                     use local copies instead of downloading, and prefer the
+                     real capture time from *.supplemental-metadata.json
+  -i, --index FILE   Path to the sha1 index (default DIR/.sha1-index.txt);
+                     useful when the local-source dir is read-only
+  -x, --exif-date    Rewrite EXIF date tags (DateTimeOriginal/CreateDate/
+                     ModifyDate) of the fixed copy before upload (exiftool).
+                     Preserves all other EXIF metadata (GPS, camera, ...).
   -n, --dry-run      Read-only: show what would be done
   -y, --yes          Skip confirmation prompt
   -h, --help         Show this help
@@ -193,6 +220,9 @@ main() {
       -n|--dry-run) DRY_RUN=1 ;;
       -y|--yes) YES=1 ;;
       -a|--album-cache) shift; ALBUM_CACHE="${1:-}"; [[ -z "$ALBUM_CACHE" ]] && { err "--album-cache requires a path"; usage; return 2; } ;;
+      -s|--local-source) shift; LOCAL_SOURCE="${1:-}"; [[ -z "$LOCAL_SOURCE" ]] && { err "--local-source requires a path"; usage; return 2; } ;;
+      -i|--index) shift; INDEX_FILE="${1:-}"; [[ -z "$INDEX_FILE" ]] && { err "--index requires a path"; usage; return 2; } ;;
+      -x|--exif-date) EXIF_DATE=1 ;;
       *) err "unknown: $1"; usage; return 2 ;;
     esac
     shift
@@ -200,6 +230,19 @@ main() {
 
   if [[ -z "$file" ]]; then err "--file is required"; usage; return 2; fi
   if [[ ! -f "$file" ]]; then err "file not found: $file"; return 2; fi
+  if (( EXIF_DATE )); then
+    if ! command -v exiftool >/dev/null 2>&1; then
+      err "--exif-date requires exiftool (not found in PATH)"; return 2
+    fi
+    log "exif-date mode: EXIF date tags will be rewritten (exiftool found)"
+  fi
+  if [[ -n "$LOCAL_SOURCE" ]]; then
+    if [[ ! -d "$LOCAL_SOURCE" ]]; then err "local source dir not found: $LOCAL_SOURCE"; return 2; fi
+    INDEX_FILE="${INDEX_FILE:-$LOCAL_SOURCE/.sha1-index.txt}"
+    if [[ ! -f "$INDEX_FILE" ]]; then
+      err "local source missing $INDEX_FILE (build it with: find ... -exec sha1sum {} + > .sha1-index.txt)"; return 2
+    fi
+  fi
 
   mkdir -p "$LOG_DIR"
   RUN_TS=$(date +%Y%m%d-%H%M%S)
@@ -306,8 +349,12 @@ main() {
   if (( DRY_RUN == 0 && YES == 0 )); then
     echo ""
     echo "This will fix photo(s) for each valid entry. Each photo will be:"
-    echo "  - Downloaded from Proton (kept in $WORK_DIR until fully fixed)"
-    echo "  - Modified offline (mtime adjusted)"
+    if [[ -n "$LOCAL_SOURCE" ]]; then
+      echo "  - Copied from local source ($LOCAL_SOURCE), not downloaded"
+    else
+      echo "  - Downloaded from Proton (kept in $WORK_DIR until fully fixed)"
+    fi
+    echo "  - Modified offline (mtime adjusted$([[ $EXIF_DATE == 1 ]] && echo " + EXIF dates rewritten"))"
     echo "  - Deleted from Proton (trash + permanent delete)"
     echo "  - Re-uploaded with the correct capture time (verified)"
     echo "  - Re-added to its original albums (verified)"
@@ -341,6 +388,19 @@ main() {
       name_albums["$n"]="$a"
     done < "$name_albums_file"
     log "album index built: ${#name_albums[@]} filenames indexed"
+  fi
+
+  # --- Load local-source sha1 → path index (if provided).
+  # Skip .supplemental-metadata.json and other .json sidecars when building.
+  declare -A sha1_path=()
+  if [[ -n "$LOCAL_SOURCE" ]]; then
+    log "loading sha1 index from $INDEX_FILE ..."
+    local s_idx s_p
+    while read -r s_idx s_p; do
+      [[ -z "$s_idx" || -z "$s_p" ]] && continue
+      sha1_path["$s_idx"]="$s_p"
+    done < "$INDEX_FILE"
+    log "sha1 index loaded: ${#sha1_path[@]} files"
   fi
 
   # --- Load per-uid fields (uid, name, captureTime, sha1, albums) into
@@ -403,6 +463,39 @@ main() {
     log "  uid=$uid albums=${albums_csv:-none}"
     log "  current captureTime: $capture_before  sha1=$sha1_before"
 
+    # --- Local source: resolve file path + real capture time override.
+    local src_file="" real_ts=""
+    if [[ -n "$LOCAL_SOURCE" ]]; then
+      src_file="${sha1_path[$sha1_before]:-}"
+      if [[ -z "$src_file" || ! -f "$src_file" ]]; then
+        log "  WARN: sha1 not found in local source — falling back to download"
+        src_file=""
+      else
+        log "  local source: $src_file"
+        local sidecar="${src_file}.supplemental-metadata.json"
+        if [[ -f "$sidecar" ]]; then
+          real_ts=$(jq -r '.photoTakenTime.timestamp // empty' "$sidecar" 2>/dev/null)
+          if [[ -n "$real_ts" && "$real_ts" =~ ^[0-9]+$ ]]; then
+            local real_date real_epoch
+            real_date=$(date -d "@$real_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null) || real_date=""
+            if [[ -n "$real_date" ]]; then
+              real_epoch=$(to_epoch "$real_date" 2>/dev/null || echo "")
+              if [[ -n "$real_epoch" && "$real_epoch" -ge 631152000 && "$real_epoch" -le $(date +%s) ]]; then
+                log "  real capture time from Google metadata: $real_date (TSV target was $norm)"
+                norm="$real_date"
+                target_epoch="$real_epoch"
+                norm_dates[$i]="$real_date"
+                target_epochs[$i]="$real_epoch"
+                touch_fmt=$(to_touch_format "$norm") || true
+              else
+                log "  WARN: sidecar photoTakenTime out of range ($real_date) — keeping TSV target $norm"
+              fi
+            fi
+          fi
+        fi
+      fi
+    fi
+
     # Idempotency: already at target (±120s)?
     local cur_epoch=""
     if [[ -n "$capture_before" ]]; then
@@ -422,32 +515,67 @@ main() {
     fi
 
     if (( DRY_RUN )); then
-      log "  DRY RUN: would download, fix mtime to $norm, trash, delete, re-upload, re-add albums (${albums_csv:-none})"
+      local src_note="download"
+      [[ -n "$src_file" && -f "$src_file" ]] && src_note="copy from local source"
+      log "  DRY RUN: would $src_note, fix date to $norm, trash, delete, re-upload, re-add albums (${albums_csv:-none})"
       continue
     fi
 
-    # --- Download into a dedicated, artifact-free subdir (F2).
+    # --- Obtain the file bytes: copy from local source, else download from Proton.
     local dl="$WORK_DIR/dl-$i"
     rm -rf "$dl"; mkdir -p "$dl"
-    log "  downloading ..."
-    if ! "$CLI" photo download "/photos/$uid" "$dl" > "$WORK_DIR/download-$i.out" 2>&1; then
-      err "download failed for $fn (kept work dir: $WORK_DIR)"; fix_fail=$((fix_fail+1)); continue
+    if [[ -n "$src_file" && -f "$src_file" ]]; then
+      log "  copying from local source ..."
+      if ! cp "$src_file" "$dl/"; then
+        err "copy from local source failed for $fn (kept work dir: $WORK_DIR)"; fix_fail=$((fix_fail+1)); continue
+      fi
+    else
+      log "  downloading ..."
+      if ! "$CLI" photo download "/photos/$uid" "$dl" > "$WORK_DIR/download-$i.out" 2>&1; then
+        err "download failed for $fn (kept work dir: $WORK_DIR)"; fix_fail=$((fix_fail+1)); continue
+      fi
     fi
     local -a candidates=()
     local cf
     while IFS= read -r -d '' cf; do candidates+=("$cf"); done < <(find "$dl" -type f -print0)
     if (( ${#candidates[@]} != 1 )); then
-      err "expected exactly 1 downloaded file in $dl, found ${#candidates[@]} (kept: $dl)"
+      err "expected exactly 1 file in $dl, found ${#candidates[@]} (kept: $dl)"
       fix_fail=$((fix_fail+1)); continue
     fi
     local local_path="${candidates[0]}"
 
-    # --- Integrity: downloaded bytes must match the original sha1 (F14).
+    # --- Integrity: bytes must match the original sha1 (F14).
     local dl_sha1
     dl_sha1=$(sha1sum "$local_path" | awk '{print $1}')
     if [[ "$dl_sha1" != "$sha1_before" ]]; then
-      err "download sha1 mismatch for $fn ($dl_sha1 != $sha1_before) — refusing to destroy original (kept: $dl)"
+      err "sha1 mismatch for $fn ($dl_sha1 != $sha1_before) — refusing to destroy original (kept: $dl)"
       fix_fail=$((fix_fail+1)); continue
+    fi
+
+    # --- Rewrite EXIF date tags (optional, --exif-date).  This changes the
+    # file content, so the sha1 recorded for the batch-verify lookup must be
+    # recomputed afterwards (uploaded bytes differ from the original sha1).
+    # Only image formats carry DateTimeOriginal/CreateDate/ModifyDate EXIF
+    # tags; videos (mp4/mov) are handled via mtime instead.
+    local sha1_uploaded="$sha1_before"
+    if (( EXIF_DATE )); then
+      local ext="${local_path##*.}"; ext="${ext,,}"
+      case "$ext" in
+        jpg|jpeg|heic|png|tif|tiff|nef|arw|dng|cr2)
+          log "  rewriting EXIF dates to $norm ..."
+          local exif_dt="${norm//-/:}"   # YYYY-MM-DD HH:MM:SS → YYYY:MM:DD HH:MM:SS
+          if ! exiftool -overwrite_original \
+                -DateTimeOriginal="$exif_dt" \
+                -CreateDate="$exif_dt" \
+                -ModifyDate="$exif_dt" \
+                "$local_path" > "$WORK_DIR/exif-$i.out" 2>&1; then
+            err "exiftool failed for $fn — see $WORK_DIR/exif-$i.out (kept: $dl)"
+            fix_fail=$((fix_fail+1)); continue
+          fi
+          sha1_uploaded=$(sha1sum "$local_path" | awk '{print $1}')
+          log "  sha1 after EXIF rewrite: $sha1_uploaded"
+          ;;
+      esac
     fi
 
     # --- Fix mtime (server TZ; override with TZ=... if needed).
@@ -462,6 +590,7 @@ main() {
       printf 'uid=%s\n' "$uid"
       printf 'albums=%s\n' "$albums_csv"
       printf 'sha1=%s\n' "$sha1_before"
+      printf 'sha1_uploaded=%s\n' "$sha1_uploaded"
       printf 'target=%s\n' "$norm"
       printf 'file=%s\n' "$local_path"
     } > "$state_file"
@@ -505,8 +634,9 @@ main() {
 
     # Upload succeeded: record for batch verification. Local bytes are now
     # safely re-uploaded to Proton, so free the disk copy right away (the
-    # state file retains uid/sha1/albums for recovery).
-    printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$sha1_before" "$uid" "$albums_csv" "$norm" >> "$pending_file"
+    # state file retains uid/sha1/albums for recovery). The sha1 recorded is
+    # the sha1 of the UPLOADED bytes (== sha1_before unless --exif-date).
+    printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$sha1_uploaded" "$uid" "${albums_csv:--}" "$norm" >> "$pending_file"
     rm -rf "$dl"
     log "  uploaded — deferred to batch verification"
   done
@@ -568,6 +698,7 @@ main() {
 
       local i2 sha1 albums_csv norm2 entry_partial new_capture new_capture_epoch cap_delta
       while IFS=$'\t' read -r i2 sha1 _old_uid albums_csv norm2; do
+        [[ "$albums_csv" == "-" ]] && albums_csv=""
         fn="${filenames[$i2]}"
         target_epoch="${target_epochs[$i2]}"
         new_uid="${sha1_uid[$sha1]:-}"

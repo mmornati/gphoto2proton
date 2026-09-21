@@ -8,18 +8,23 @@ timestamp) instead of the original recording date.
 
 For images the CLI reads EXIF natively (dates are usually correct), so this
 script is mainly used for videos — but it works for any photo whose capture
-time is wrong.
+time is wrong. When the original Google Photos files are available locally,
+`--local-source` skips the download entirely and, combined with `--exif-date`,
+rewrites the EXIF date tags so Proton honours the corrected date for **images**
+too (not just videos).
 
 - **Platform:** Linux (GNU `date`/coreutils).
 - **Dependencies:** `proton-drive` CLI (authenticated), `jq`, `date`,
-  `sha1sum`, `touch`, `find`, `awk`, `sort`, `cut`, `grep`.
+  `sha1sum`, `touch`, `find`, `awk`, `sort`, `cut`, `grep`. `exiftool` is
+  required only when using `--exif-date`.
 
 ---
 
 ## Usage
 
 ```bash
-fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--dry-run] [--yes]
+fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--local-source DIR]
+                  [--exif-date] [--dry-run] [--yes]
 ```
 
 ## Flags
@@ -28,6 +33,8 @@ fix-photo-date.sh --file fixes.tsv [--album-cache DIR] [--dry-run] [--yes]
 |---|---|
 | `-f, --file` | **Required.** TSV input file with two or three columns: `filename<TAB>date-or-timestamp` or `filename<TAB>nodeUid<TAB>date-or-timestamp`. |
 | `-a, --album-cache` | Directory with per-album JSON caches (from `detect-album-conflicts.sh --cache-dir`). Used to recover album membership when the timeline lacks it, and to disambiguate photos by uid. |
+| `-s, --local-source` | Directory with the **original** photo files (e.g. extracted Google Takeout, one folder per album) plus a `.sha1-index.txt` (`<sha1>  <path>` per line, case-insensitive over `*.jpg/*.jpeg/*.heic/*.png/*.mp4/*.mov/*.nef`). Photos found by sha1 are copied from disk instead of downloaded. If a sibling `*.supplemental-metadata.json` has a valid `photoTakenTime.timestamp`, it **overrides the TSV target date** with Google's real capture time. |
+| `-x, --exif-date` | Rewrite the EXIF date tags (`DateTimeOriginal`/`CreateDate`/`ModifyDate`) of the fixed copy before upload (image formats only; videos are handled via mtime). Requires `exiftool`; all other EXIF metadata (GPS, camera, …) is preserved. Changes the file's sha1, so the batch verification looks up the new uid by the **uploaded** sha1. |
 | `-n, --dry-run` | **Read-only.** Show what would be done without making any changes. |
 | `-y, --yes` | Skip the confirmation prompt. |
 | `-h, --help` | Show the script help. |
@@ -104,19 +111,28 @@ For each entry:
 1. **Find** — the photo's uid, sha1, captureTime and album memberships are read
    from the prebuilt index (near-instant, no timeline scan). Name-based entries
    map through the index; uid-pinned entries go straight to their uid.
-2. **Download** — the original bytes are downloaded from Proton into a
-   dedicated, artifact-free work subdir.
-3. **Integrity check** — the downloaded file's sha1 must match the claimed
-   digest; otherwise the script **refuses to destroy the original**.
-4. **Fix mtime** — the filesystem mtime is set to the target date with
+2. **Obtain bytes** — with `--local-source`, the file is copied from disk (found
+   by sha1); otherwise it is downloaded from Proton into a dedicated,
+   artifact-free work subdir.
+3. **Real date override** — with `--local-source`, if the local file has a
+   `*.supplemental-metadata.json` sidecar with a valid `photoTakenTime`, the
+   target date is replaced by Google's real capture time (more accurate than
+   any album-derived date).
+4. **Integrity check** — the file's sha1 must match the claimed digest;
+   otherwise the script **refuses to destroy the original**.
+5. **Rewrite EXIF** (only with `--exif-date`, image formats) — the three date
+   tags are set with `exiftool -overwrite_original`; all other metadata is
+   preserved. This changes the file's sha1, so `sha1_uploaded` is recomputed
+   and used as the batch-verification lookup key.
+6. **Fix mtime** — the filesystem mtime is set to the target date with
    `touch -t` (the CLI reads this as capture time for videos).
-5. **Persist state** — a state file (uid, albums, sha1, target date, local
-   path) is written **before** any destructive step.
-6. **Trash** — `proton-drive filesystem trash /photos/<uid>`.
-7. **Permanently delete** — `proton-drive filesystem delete /photos-trash/<uid>`.
-8. **Re-upload** — `proton-drive photo upload -c keep-both`, up to 3 attempts
-   (handles a stale dedup cache that may skip once after delete).
-9. The entry is recorded in a pending file and the local byte copy is freed.
+7. **Persist state** — a state file (uid, albums, sha1, sha1_uploaded, target
+   date, local path) is written **before** any destructive step.
+8. **Trash** — `proton-drive filesystem trash /photos/<uid>`.
+9. **Permanently delete** — `proton-drive filesystem delete /photos-trash/<uid>`.
+10. **Re-upload** — `proton-drive photo upload -c keep-both`, up to 3 attempts
+    (handles a stale dedup cache that may skip once after delete).
+11. The entry is recorded in a pending file and the local byte copy is freed.
 
 ### Phase C — Batch verify
 
@@ -134,8 +150,10 @@ some new uids are not yet visible):
 > **Note on EXIF:** Proton derives `captureTime` from embedded EXIF for photos
 > that have it. Images with a valid EXIF date keep their EXIF date regardless
 > of the mtime fix — only videos (no EXIF) and photos without usable EXIF
-> respond to the mtime change. Such images are marked **partial**, matching the
-> behaviour of the older per-photo implementation.
+> respond to the mtime change. Without `--exif-date`, such images are marked
+> **partial**, matching the behaviour of the older per-photo implementation.
+> Use `--exif-date` to rewrite the EXIF date tags so Proton honours the
+> corrected date for image files too.
 
 ---
 
@@ -253,3 +271,44 @@ Final summary per run:
 - `partial` — photo re-uploaded but something still wrong (e.g. capture time
   verification failed, or an album add failed) — work files kept
 - `failed` — could not be fixed — work files kept, script exits non-zero
+
+---
+
+## Using `--local-source` + `--exif-date`
+
+When the original files (e.g. from a Google Takeout export, extracted one
+folder per album) are on disk, they can serve both as the byte source and as
+the **ground truth for the date**:
+
+```bash
+# 1. Build a case-insensitive sha1 index over the local files (once)
+find /media/12tb/photos -type f \
+  \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' -o -iname '*.png' \
+     -o -iname '*.mp4' -o -iname '*.mov' -o -iname '*.nef' \) \
+  -exec sha1sum {} + > /media/12tb/photos/.sha1-index.txt
+
+# 2. Find every Google-sourced photo whose Proton date disagrees with the
+#    real photoTakenTime (from *.supplemental-metadata.json sidecars)
+~/gphoto2proton/detect-google-conflicts.sh \
+  --local-source /media/12tb/photos --output fixes-google.tsv
+
+# 3. Fix them all: copy from local source, prefer Google's real date, and
+#    rewrite EXIF dates so images also get the corrected capture time
+~/gphoto2proton/fix-photo-date.sh --file fixes-google.tsv \
+  --album-cache photo-cache --local-source /media/12tb/photos \
+  --exif-date --yes
+```
+
+Key points:
+
+- The sha1 index must be **case-insensitive** over the extensions above,
+  otherwise uppercase files (`DSCN0810.JPG`, `*.MOV`, `*.HEIC`, …) are missed.
+- `--local-source` skips the Proton download entirely (photos found by sha1),
+  then overrides the TSV target with Google's real `photoTakenTime` from the
+  sidecar — the album-derived fallback date is used only when no sidecar
+  exists.
+- `--exif-date` only touches the three date tags (`DateTimeOriginal`,
+  `CreateDate`, `ModifyDate`) and keeps all other EXIF data (GPS, camera,
+  etc.). Because the file's sha1 changes, the new uid is located by the
+  **uploaded** sha1 instead of the original one.
+- Videos have no such EXIF tags; they are fixed via mtime as before.
